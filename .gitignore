@@ -28,10 +28,6 @@ CMakeCache.txt
 *.swp
 *.swo
 
-# Local design drafts
-design.md
-software_design.md
-
 # OS files
 .DS_Store
 Thumbs.db
