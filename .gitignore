@@ -1,0 +1,40 @@
+# Build outputs
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+
+# Compiled objects and binaries
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+
+# Coverage and profiling artifacts
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+
+# Local editor and tool state
+.vscode/
+.idea/
+*.user
+*.swp
+*.swo
+
+# Local design drafts
+design.md
+software_design.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated compile database
+compile_commands.json
