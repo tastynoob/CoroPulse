@@ -2,6 +2,7 @@
 
 #include "cpas/task.hpp"
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
@@ -17,6 +18,12 @@ namespace cpas {
 class Scheduler {
 public:
     using Handle = Task<void>::handle_type;
+    using Duration = std::chrono::nanoseconds;
+
+    struct TaskSample {
+        std::size_t component_id = 0;
+        Duration active_time{0};
+    };
 
     explicit Scheduler(std::size_t worker_count = 1)
         : worker_count_(worker_count == 0 ? 1 : worker_count) {
@@ -50,9 +57,13 @@ public:
     Scheduler(const Scheduler&) = delete;
     Scheduler& operator=(const Scheduler&) = delete;
 
-    void add(Task<void> task) {
+    void add(Task<void> task, std::size_t component_id = 0,
+             bool profile_active_time = false) {
         task.bind(*this);
         auto handle = task.release();
+        handle.promise().component_id = component_id;
+        handle.promise().profile_active_time = profile_active_time;
+        handle.promise().active_time = Duration{0};
 
         std::lock_guard lock(mutex_);
         if (failed_) {
@@ -110,7 +121,7 @@ public:
                 std::rethrow_exception(exception);
             }
 
-            if (live_ == 0) {
+            if (live_ == 0 && active_ == 0 && ready_.empty()) {
                 dispatching_ = false;
                 work_cv_.notify_all();
                 return;
@@ -126,7 +137,9 @@ public:
                 std::rethrow_exception(exception);
             }
 
-            done_cv_.wait(lock);
+            done_cv_.wait(lock, [this] {
+                return first_exception_ || (ready_.empty() && active_ == 0);
+            });
         }
     }
 
@@ -137,7 +150,16 @@ public:
 
     std::size_t workerCount() const noexcept { return worker_count_; }
 
+    std::vector<TaskSample> takeSamples() {
+        std::lock_guard lock(mutex_);
+        std::vector<TaskSample> samples;
+        samples.swap(samples_);
+        return samples;
+    }
+
 private:
+    using Clock = std::chrono::steady_clock;
+
     void workerLoop() noexcept {
         for (;;) {
             Handle handle{};
@@ -164,16 +186,37 @@ private:
     void runOne(Handle handle) noexcept {
         std::exception_ptr resume_exception;
 
-        try {
-            handle.resume();
-        } catch (...) {
-            resume_exception = std::current_exception();
+        if (handle.promise().profile_active_time) {
+            const auto start = Clock::now();
+            try {
+                handle.resume();
+            } catch (...) {
+                resume_exception = std::current_exception();
+            }
+            const auto elapsed =
+                std::chrono::duration_cast<Duration>(Clock::now() - start);
+            handle.promise().active_time += elapsed;
+        } else {
+            try {
+                handle.resume();
+            } catch (...) {
+                resume_exception = std::current_exception();
+            }
         }
 
         std::exception_ptr coroutine_exception;
+        TaskSample sample;
+        bool has_sample = false;
         const bool done = !resume_exception && handle.done();
         if (done) {
             coroutine_exception = handle.promise().exception;
+            if (handle.promise().profile_active_time) {
+                sample = TaskSample{
+                    handle.promise().component_id,
+                    handle.promise().active_time,
+                };
+                has_sample = true;
+            }
         }
 
         {
@@ -181,6 +224,9 @@ private:
             --active_;
 
             if (done) {
+                if (has_sample) {
+                    samples_.push_back(sample);
+                }
                 handle.destroy();
                 forgetLocked(handle);
                 --live_;
@@ -213,6 +259,7 @@ private:
     std::condition_variable done_cv_;
     std::deque<Handle> ready_;
     std::vector<Handle> owned_;
+    std::vector<TaskSample> samples_;
     std::size_t live_ = 0;
     std::size_t active_ = 0;
     bool dispatching_ = false;

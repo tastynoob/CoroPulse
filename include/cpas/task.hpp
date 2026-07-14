@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <coroutine>
+#include <cstddef>
 #include <exception>
 #include <stdexcept>
 #include <utility>
@@ -18,6 +20,9 @@ public:
     struct promise_type {
         Scheduler* scheduler = nullptr;
         std::exception_ptr exception;
+        std::size_t component_id = 0;
+        bool profile_active_time = false;
+        std::chrono::nanoseconds active_time{0};
 
         Task get_return_object() noexcept {
             return Task(handle_type::from_promise(*this));
