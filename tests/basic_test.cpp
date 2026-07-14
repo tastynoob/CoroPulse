@@ -1,4 +1,4 @@
-#include "cpas/sim.hpp"
+#include "sim.hh"
 
 #include <cassert>
 #include <optional>
@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-using namespace cpas;
+using namespace coropulse;
 
 struct Ready {
     bool can_accept = false;

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "cpas/scheduler.hpp"
-#include "cpas/types.hpp"
+#include "scheduler.hh"
+#include "types.hh"
 
 #include <algorithm>
 #include <cstddef>
@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace cpas {
+namespace coropulse {
 
 class TickContext {
 public:
@@ -191,4 +191,4 @@ private:
     bool load_balancing_enabled_ = false;
 };
 
-} // namespace cpas
+} // namespace coropulse

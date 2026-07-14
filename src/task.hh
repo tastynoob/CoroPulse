@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace cpas {
+namespace coropulse {
 
 class Scheduler;
 
@@ -79,4 +79,4 @@ private:
     handle_type handle_{};
 };
 
-} // namespace cpas
+} // namespace coropulse

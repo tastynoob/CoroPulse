@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-namespace cpas {
+namespace coropulse {
 
 using TickId = std::uint64_t;
 using SlaverId = std::size_t;
@@ -22,4 +22,4 @@ inline std::string objectError(std::string_view kind, std::string_view name,
     return out;
 }
 
-} // namespace cpas
+} // namespace coropulse

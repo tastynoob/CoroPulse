@@ -1,11 +1,11 @@
-#include "cpas/sim.hpp"
+#include "sim.hh"
 
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
-using namespace cpas;
+using namespace coropulse;
 
 namespace {
 

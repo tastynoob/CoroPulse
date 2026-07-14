@@ -1,4 +1,4 @@
-#include "cpas/sim.hpp"
+#include "sim.hh"
 
 #include <algorithm>
 #include <chrono>
@@ -10,7 +10,7 @@
 #include <string_view>
 #include <vector>
 
-using namespace cpas;
+using namespace coropulse;
 
 namespace {
 

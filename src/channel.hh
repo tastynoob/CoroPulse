@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cpas/runtime.hpp"
+#include "runtime.hh"
 
 #include <mutex>
 #include <optional>
@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-namespace cpas {
+namespace coropulse {
 
 template <class T>
 class Channel final : public TickObject {
@@ -224,4 +224,4 @@ private:
     SlaverId id_;
 };
 
-} // namespace cpas
+} // namespace coropulse

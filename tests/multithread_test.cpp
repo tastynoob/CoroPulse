@@ -1,11 +1,11 @@
-#include "cpas/sim.hpp"
+#include "sim.hh"
 
 #include <atomic>
 #include <cassert>
 #include <memory>
 #include <vector>
 
-using namespace cpas;
+using namespace coropulse;
 
 struct Ready {
     bool can_accept = false;

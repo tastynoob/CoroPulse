@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cpas/task.hpp"
+#include "task.hh"
 
 #include <chrono>
 #include <condition_variable>
@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace cpas {
+namespace coropulse {
 
 class Scheduler {
 public:
@@ -268,4 +268,4 @@ private:
     std::exception_ptr first_exception_;
 };
 
-} // namespace cpas
+} // namespace coropulse
