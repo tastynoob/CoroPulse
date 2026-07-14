@@ -11,27 +11,36 @@
 
 namespace coropulse {
 
+class Simulator;
+template <class T>
+class SignalOutput;
+template <class T>
+class SignalInput;
+
 template <class T>
 class Signal final : public TickObject {
 public:
-    class Master;
-    class Slaver;
-    class Awaiter;
-
     explicit Signal(std::string name = {}) : name_(std::move(name)) {}
 
-    Master master() {
-        if (master_created_) {
-            throw std::runtime_error(objectError("signal", name_, "master already exists"));
+private:
+    class Awaiter;
+
+    friend class Simulator;
+    friend class SignalOutput<T>;
+    friend class SignalInput<T>;
+    friend class Awaiter;
+
+    void attachWriter() {
+        if (writer_connected_) {
+            throw std::runtime_error(objectError("signal", name_, "writer already exists"));
         }
-        master_created_ = true;
-        return Master(this);
+        writer_connected_ = true;
     }
 
-    Slaver addSlaver() {
-        const auto id = slaver_count_++;
+    std::size_t attachReader() {
+        const auto id = reader_count_++;
         read_by_.push_back(false);
-        return Slaver(this, id);
+        return id;
     }
 
     void beginTick(TickId tick) override {
@@ -40,7 +49,7 @@ public:
         ready_ = false;
         value_.reset();
         waiters_.clear();
-        read_by_.assign(slaver_count_, false);
+        read_by_.assign(reader_count_, false);
     }
 
     void commit(TickId) override {}
@@ -59,15 +68,10 @@ public:
         for (bool read : read_by_) {
             if (!read) {
                 throw std::runtime_error(
-                    objectError("signal", name_, "set value was not read by every slaver"));
+                    objectError("signal", name_, "set value was not read by every reader"));
             }
         }
     }
-
-private:
-    friend class Master;
-    friend class Slaver;
-    friend class Awaiter;
 
     bool allReadLocked() const {
         for (bool read : read_by_) {
@@ -102,28 +106,28 @@ private:
         }
     }
 
-    bool awaitReady(SlaverId id, TickContext& ctx) {
+    bool awaitReady(std::size_t reader_id, TickContext& ctx) {
         std::lock_guard lock(mutex_);
-        checkSlaverLocked(id);
+        checkReaderLocked(reader_id);
         if (ctx.tick() != tick_) {
             throw std::runtime_error(objectError("signal", name_, "read with stale context"));
         }
-        if (read_by_[id]) {
+        if (read_by_[reader_id]) {
             throw std::runtime_error(
-                objectError("signal", name_, "duplicate slaver read in one tick"));
+                objectError("signal", name_, "duplicate reader read in one tick"));
         }
         return ready_;
     }
 
-    bool awaitSuspend(SlaverId id, TickContext& ctx, Scheduler::Handle handle) {
+    bool awaitSuspend(std::size_t reader_id, TickContext& ctx, Scheduler::Handle handle) {
         std::lock_guard lock(mutex_);
-        checkSlaverLocked(id);
+        checkReaderLocked(reader_id);
         if (ctx.tick() != tick_) {
             throw std::runtime_error(objectError("signal", name_, "read with stale context"));
         }
-        if (read_by_[id]) {
+        if (read_by_[reader_id]) {
             throw std::runtime_error(
-                objectError("signal", name_, "duplicate slaver read in one tick"));
+                objectError("signal", name_, "duplicate reader read in one tick"));
         }
         if (ready_) {
             return false;
@@ -132,19 +136,19 @@ private:
         return true;
     }
 
-    T awaitResume(SlaverId id) {
+    T awaitResume(std::size_t reader_id) {
         std::lock_guard lock(mutex_);
-        checkSlaverLocked(id);
+        checkReaderLocked(reader_id);
         if (!ready_ || !value_) {
             throw std::runtime_error(objectError("signal", name_, "resumed before set"));
         }
-        if (read_by_[id]) {
+        if (read_by_[reader_id]) {
             throw std::runtime_error(
-                objectError("signal", name_, "duplicate slaver read in one tick"));
+                objectError("signal", name_, "duplicate reader read in one tick"));
         }
 
         auto value = *value_;
-        read_by_[id] = true;
+        read_by_[reader_id] = true;
 
         if (allReadLocked()) {
             value_.reset();
@@ -153,16 +157,16 @@ private:
         return value;
     }
 
-    void checkSlaverLocked(SlaverId id) const {
-        if (id >= slaver_count_) {
-            throw std::runtime_error(objectError("signal", name_, "invalid slaver id"));
+    void checkReaderLocked(std::size_t reader_id) const {
+        if (reader_id >= reader_count_) {
+            throw std::runtime_error(objectError("signal", name_, "invalid reader id"));
         }
     }
 
     std::string name_;
     TickId tick_ = 0;
-    bool master_created_ = false;
-    std::size_t slaver_count_ = 0;
+    bool writer_connected_ = false;
+    std::size_t reader_count_ = 0;
 
     std::mutex mutex_;
     bool ready_ = false;
@@ -172,69 +176,110 @@ private:
 };
 
 template <class T>
-class Signal<T>::Master {
-public:
-    explicit Master(Signal* signal = nullptr) noexcept : signal_(signal) {}
-
-    void set(TickContext& ctx, T value) const {
-        ensure();
-        signal_->set(ctx, std::move(value));
-    }
-
-private:
-    void ensure() const {
-        if (!signal_) {
-            throw std::runtime_error("empty signal master");
-        }
-    }
-
-    Signal* signal_;
-};
-
-template <class T>
-class Signal<T>::Slaver {
-public:
-    Slaver(Signal* signal = nullptr, SlaverId id = 0) noexcept
-        : signal_(signal), id_(id) {}
-
-    Awaiter read(TickContext& ctx) const {
-        ensure();
-        return Awaiter(signal_, id_, &ctx);
-    }
-
-private:
-    void ensure() const {
-        if (!signal_) {
-            throw std::runtime_error("empty signal slaver");
-        }
-    }
-
-    Signal* signal_;
-    SlaverId id_;
-};
-
-template <class T>
 class Signal<T>::Awaiter {
 public:
-    Awaiter(Signal* signal, SlaverId id, TickContext* ctx) noexcept
-        : signal_(signal), id_(id), ctx_(ctx) {}
+    Awaiter(Signal* signal, std::size_t reader_id, TickContext* ctx) noexcept
+        : signal_(signal), reader_id_(reader_id), ctx_(ctx) {}
 
     bool await_ready() {
-        return signal_->awaitReady(id_, *ctx_);
+        return signal_->awaitReady(reader_id_, *ctx_);
     }
 
     bool await_suspend(Scheduler::Handle handle) {
-        return signal_->awaitSuspend(id_, *ctx_, handle);
+        return signal_->awaitSuspend(reader_id_, *ctx_, handle);
     }
 
     T await_resume() {
-        return signal_->awaitResume(id_);
+        return signal_->awaitResume(reader_id_);
     }
 
 private:
     Signal* signal_;
-    SlaverId id_;
+    std::size_t reader_id_;
     TickContext* ctx_;
+};
+
+template <class T>
+class SignalOutput {
+public:
+    explicit SignalOutput(std::string name = {}) : name_(std::move(name)) {}
+
+    bool connected() const noexcept {
+        return connected_;
+    }
+
+    const std::string& name() const noexcept {
+        return name_;
+    }
+
+    void set(T value) const {
+        ensure();
+        signal_->set(detail::currentTickContext(), std::move(value));
+    }
+
+private:
+    friend class Simulator;
+
+    void bind(Signal<T>& signal) {
+        if (connected_) {
+            throw std::runtime_error("signal output port is already connected");
+        }
+        signal.attachWriter();
+        signal_ = &signal;
+        connected_ = true;
+    }
+
+    void ensure() const {
+        if (!connected_) {
+            throw std::runtime_error("signal output port is not connected");
+        }
+    }
+
+    std::string name_;
+    Signal<T>* signal_ = nullptr;
+    bool connected_ = false;
+};
+
+template <class T>
+class SignalInput {
+public:
+    explicit SignalInput(std::string name = {}) : name_(std::move(name)) {}
+
+    bool connected() const noexcept {
+        return connected_;
+    }
+
+    const std::string& name() const noexcept {
+        return name_;
+    }
+
+    typename Signal<T>::Awaiter read() const {
+        ensure();
+        return typename Signal<T>::Awaiter(signal_, reader_id_, &detail::currentTickContext());
+    }
+
+private:
+    friend class Simulator;
+
+    void bind(Signal<T>& signal) {
+        if (connected_) {
+            throw std::runtime_error("signal input port is already connected");
+        }
+        signal_ = &signal;
+        reader_id_ = signal.attachReader();
+        connected_ = true;
+    }
+
+    void ensure() const {
+        if (!connected_) {
+            throw std::runtime_error("signal input port is not connected");
+        }
+    }
+
+    std::string name_;
+    Signal<T>* signal_ = nullptr;
+    std::size_t reader_id_ = 0;
+    bool connected_ = false;
 };
 
 } // namespace coropulse

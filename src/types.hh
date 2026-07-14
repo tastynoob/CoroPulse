@@ -8,7 +8,6 @@
 namespace coropulse {
 
 using TickId = std::uint64_t;
-using SlaverId = std::size_t;
 
 inline std::string objectError(std::string_view kind, std::string_view name,
                                std::string_view message) {

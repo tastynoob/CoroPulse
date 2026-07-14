@@ -58,9 +58,10 @@ public:
     Scheduler& operator=(const Scheduler&) = delete;
 
     void add(Task<void> task, std::size_t component_id = 0,
-             bool profile_active_time = false) {
+             bool profile_active_time = false, TickContext* tick_context = nullptr) {
         task.bind(*this);
         auto handle = task.release();
+        handle.promise().tick_context = tick_context;
         handle.promise().component_id = component_id;
         handle.promise().profile_active_time = profile_active_time;
         handle.promise().active_time = Duration{0};
@@ -189,6 +190,7 @@ private:
         if (handle.promise().profile_active_time) {
             const auto start = Clock::now();
             try {
+                detail::ScopedTickContext context(handle.promise().tick_context);
                 handle.resume();
             } catch (...) {
                 resume_exception = std::current_exception();
@@ -198,6 +200,7 @@ private:
             handle.promise().active_time += elapsed;
         } else {
             try {
+                detail::ScopedTickContext context(handle.promise().tick_context);
                 handle.resume();
             } catch (...) {
                 resume_exception = std::current_exception();

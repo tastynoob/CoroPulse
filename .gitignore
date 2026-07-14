@@ -27,6 +27,7 @@ CMakeCache.txt
 *.user
 *.swp
 *.swo
+*.md
 
 # OS files
 .DS_Store

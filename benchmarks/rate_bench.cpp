@@ -6,7 +6,6 @@
 #include <iomanip>
 #include <iostream>
 #include <optional>
-#include <string_view>
 #include <vector>
 
 using namespace coropulse;
@@ -37,21 +36,20 @@ std::uint64_t burnCpu(std::uint64_t value, std::uint64_t rounds) {
 
 class StressModule final : public Component {
 public:
-    StressModule(std::string_view name, std::uint64_t stage_id,
-                 std::uint64_t work_rounds,
-                 std::optional<Channel<std::uint64_t>::Slaver> input,
-                 std::optional<Channel<std::uint64_t>::Master> output)
+    Input<std::uint64_t> in{"in"};
+    Output<std::uint64_t> out{"out"};
+
+    StressModule(std::uint64_t stage_id, std::uint64_t work_rounds,
+                 bool has_input, bool has_output)
         : stage_id_(stage_id),
           work_rounds_(work_rounds),
-          input_(input),
-          output_(output),
-          state_(0x123456789abcdef0ULL ^ (stage_id * 0x100000001b3ULL)) {
-        (void)name;
-    }
+          has_input_(has_input),
+          has_output_(has_output),
+          state_(0x123456789abcdef0ULL ^ (stage_id * 0x100000001b3ULL)) {}
 
-    Task<void> tick(TickContext& ctx) override {
-        if (input_) {
-            auto value = input_->read(ctx);
+    Task<void> tick() override {
+        if (has_input_) {
+            auto value = in.read();
             if (value) {
                 state_ ^= *value + stage_id_ * 0x517cc1b727220a95ULL;
                 pending_output_ = state_ ^ (*value << 1);
@@ -62,14 +60,14 @@ public:
             ++produced_;
         }
 
-        state_ = burnCpu(state_ + ctx.tick() + stage_id_, work_rounds_);
+        state_ = burnCpu(state_ + currentTick() + stage_id_, work_rounds_);
 
-        if (output_ && pending_output_) {
+        if (has_output_ && pending_output_) {
             const auto value = *pending_output_ ^ state_;
-            if (output_->write(ctx, value)) {
+            if (out.write(value)) {
                 pending_output_.reset();
             }
-        } else if (!output_) {
+        } else if (!has_output_) {
             checksum_ ^= state_ + pending_output_.value_or(0);
             pending_output_.reset();
         }
@@ -84,8 +82,8 @@ public:
 private:
     std::uint64_t stage_id_;
     std::uint64_t work_rounds_;
-    std::optional<Channel<std::uint64_t>::Slaver> input_;
-    std::optional<Channel<std::uint64_t>::Master> output_;
+    bool has_input_;
+    bool has_output_;
     std::optional<std::uint64_t> pending_output_;
     std::uint64_t state_;
     std::uint64_t checksum_ = 0;
@@ -103,29 +101,19 @@ struct BenchResult {
 };
 
 BenchResult runBench(std::size_t workers, std::uint64_t ticks, std::uint64_t work_rounds) {
-    Runtime runtime(workers);
+    Simulator sim(workers);
 
-    Channel<std::uint64_t> ab("A->B");
-    Channel<std::uint64_t> bc("B->C");
-    Channel<std::uint64_t> cd("C->D");
-
-    runtime.addObject(ab);
-    runtime.addObject(bc);
-    runtime.addObject(cd);
-
-    StressModule a("A", 1, work_rounds, std::nullopt, ab.master());
-    StressModule b("B", 2, work_rounds, ab.addSlaver(), bc.master());
-    StressModule c("C", 3, work_rounds, bc.addSlaver(), cd.master());
-    StressModule d("D", 4, work_rounds, cd.addSlaver(), std::nullopt);
-
-    runtime.addComponent(a);
-    runtime.addComponent(b);
-    runtime.addComponent(c);
-    runtime.addComponent(d);
+    auto& a = sim.createComponent<StressModule>(1, work_rounds, false, true);
+    auto& b = sim.createComponent<StressModule>(2, work_rounds, true, true);
+    auto& c = sim.createComponent<StressModule>(3, work_rounds, true, true);
+    auto& d = sim.createComponent<StressModule>(4, work_rounds, true, false);
+    sim.connect(a.out, b.in);
+    sim.connect(b.out, c.in);
+    sim.connect(c.out, d.in);
 
     const auto start = std::chrono::steady_clock::now();
     for (std::uint64_t i = 0; i < ticks; ++i) {
-        runtime.runTick();
+        sim.tick();
     }
     const auto end = std::chrono::steady_clock::now();
 

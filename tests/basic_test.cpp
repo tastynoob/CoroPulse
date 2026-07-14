@@ -13,14 +13,12 @@ struct Ready {
 };
 
 struct OneShotProducer final : Component {
-    Channel<int>::Master out;
+    Output<int> out{"out"};
     bool sent = false;
 
-    explicit OneShotProducer(Channel<int>::Master out) : out(out) {}
-
-    Task<void> tick(TickContext& ctx) override {
+    Task<void> tick() override {
         if (!sent) {
-            const bool ok = out.write(ctx, 42);
+            const bool ok = out.write(42);
             assert(ok);
             sent = true;
         }
@@ -29,50 +27,44 @@ struct OneShotProducer final : Component {
 };
 
 struct RecordingConsumer final : Component {
-    Channel<int>::Slaver in;
+    Input<int> in{"in"};
     std::vector<std::optional<int>>& reads;
 
-    RecordingConsumer(Channel<int>::Slaver in, std::vector<std::optional<int>>& reads)
-        : in(in), reads(reads) {}
+    explicit RecordingConsumer(std::vector<std::optional<int>>& reads) : reads(reads) {}
 
-    Task<void> tick(TickContext& ctx) override {
-        reads.push_back(in.read(ctx));
+    Task<void> tick() override {
+        reads.push_back(in.read());
         co_return;
     }
 };
 
 void channel_values_are_visible_next_tick() {
-    Runtime runtime;
-    Channel<int> channel("numbers");
-    runtime.addObject(channel);
+    Simulator sim;
 
     std::vector<std::optional<int>> reads;
-    RecordingConsumer consumer(channel.addSlaver(), reads);
-    OneShotProducer producer(channel.master());
+    auto& producer = sim.createComponent<OneShotProducer>();
+    auto& consumer = sim.createComponent<RecordingConsumer>(reads);
+    sim.connect(producer.out, consumer.in);
 
-    runtime.addComponent(consumer);
-    runtime.addComponent(producer);
-
-    runtime.runTick();
+    sim.tick();
     assert(reads.size() == 1);
     assert(!reads[0].has_value());
 
-    runtime.runTick();
+    sim.tick();
     assert(reads.size() == 2);
     assert(reads[1].has_value());
     assert(*reads[1] == 42);
 }
 
 struct WaitingComponent final : Component {
-    Signal<bool>::Slaver ready;
+    SignalInput<bool> ready{"ready"};
     std::vector<std::string>& events;
 
-    WaitingComponent(Signal<bool>::Slaver ready, std::vector<std::string>& events)
-        : ready(ready), events(events) {}
+    explicit WaitingComponent(std::vector<std::string>& events) : events(events) {}
 
-    Task<void> tick(TickContext& ctx) override {
+    Task<void> tick() override {
         events.push_back("waiter-before");
-        const bool value = co_await ready.read(ctx);
+        const bool value = co_await ready.read();
         assert(value);
         events.push_back("waiter-after");
         co_return;
@@ -80,32 +72,27 @@ struct WaitingComponent final : Component {
 };
 
 struct SetterComponent final : Component {
-    Signal<bool>::Master ready;
+    SignalOutput<bool> ready{"ready"};
     std::vector<std::string>& events;
 
-    SetterComponent(Signal<bool>::Master ready, std::vector<std::string>& events)
-        : ready(ready), events(events) {}
+    explicit SetterComponent(std::vector<std::string>& events) : events(events) {}
 
-    Task<void> tick(TickContext& ctx) override {
+    Task<void> tick() override {
         events.push_back("setter");
-        ready.set(ctx, true);
+        ready.set(true);
         co_return;
     }
 };
 
 void pending_signal_wakes_coroutine_in_same_tick() {
-    Runtime runtime;
-    Signal<bool> signal("ready");
-    runtime.addObject(signal);
+    Simulator sim;
 
     std::vector<std::string> events;
-    WaitingComponent waiter(signal.addSlaver(), events);
-    SetterComponent setter(signal.master(), events);
+    auto& waiter = sim.createComponent<WaitingComponent>(events);
+    auto& setter = sim.createComponent<SetterComponent>(events);
+    sim.connect(setter.ready, waiter.ready);
 
-    runtime.addComponent(waiter);
-    runtime.addComponent(setter);
-
-    runtime.runTick();
+    sim.tick();
 
     const std::vector<std::string> expected = {
         "waiter-before",
@@ -116,15 +103,14 @@ void pending_signal_wakes_coroutine_in_same_tick() {
 }
 
 struct UpstreamCell final : Component {
-    Signal<Ready>::Slaver downstream_ready;
+    SignalInput<Ready> downstream_ready{"downstream-ready"};
     std::vector<std::string>& events;
 
-    UpstreamCell(Signal<Ready>::Slaver downstream_ready, std::vector<std::string>& events)
-        : downstream_ready(downstream_ready), events(events) {}
+    explicit UpstreamCell(std::vector<std::string>& events) : events(events) {}
 
-    Task<void> tick(TickContext& ctx) override {
+    Task<void> tick() override {
         events.push_back("upstream-wait");
-        const auto ready = co_await downstream_ready.read(ctx);
+        const auto ready = co_await downstream_ready.read();
         assert(ready.can_accept);
         events.push_back("upstream-send");
         co_return;
@@ -132,55 +118,46 @@ struct UpstreamCell final : Component {
 };
 
 struct MiddleCell final : Component {
-    Signal<Ready>::Slaver sink_ready;
-    Signal<Ready>::Master upstream_ready;
+    SignalInput<Ready> sink_ready{"sink-ready"};
+    SignalOutput<Ready> upstream_ready{"upstream-ready"};
     std::vector<std::string>& events;
 
-    MiddleCell(Signal<Ready>::Slaver sink_ready, Signal<Ready>::Master upstream_ready,
-               std::vector<std::string>& events)
-        : sink_ready(sink_ready), upstream_ready(upstream_ready), events(events) {}
+    explicit MiddleCell(std::vector<std::string>& events) : events(events) {}
 
-    Task<void> tick(TickContext& ctx) override {
+    Task<void> tick() override {
         events.push_back("middle-wait");
-        const auto ready = co_await sink_ready.read(ctx);
+        const auto ready = co_await sink_ready.read();
         assert(ready.can_accept);
         events.push_back("middle-ready");
-        upstream_ready.set(ctx, Ready{true});
+        upstream_ready.set(Ready{true});
         co_return;
     }
 };
 
 struct SinkCell final : Component {
-    Signal<Ready>::Master sink_ready;
+    SignalOutput<Ready> sink_ready{"sink-ready"};
     std::vector<std::string>& events;
 
-    SinkCell(Signal<Ready>::Master sink_ready, std::vector<std::string>& events)
-        : sink_ready(sink_ready), events(events) {}
+    explicit SinkCell(std::vector<std::string>& events) : events(events) {}
 
-    Task<void> tick(TickContext& ctx) override {
+    Task<void> tick() override {
         events.push_back("sink-ready");
-        sink_ready.set(ctx, Ready{true});
+        sink_ready.set(Ready{true});
         co_return;
     }
 };
 
 void timely_backpressure_propagates_through_signal_chain() {
-    Runtime runtime;
-    Signal<Ready> sink_ready("sink-ready");
-    Signal<Ready> upstream_ready("upstream-ready");
-    runtime.addObject(sink_ready);
-    runtime.addObject(upstream_ready);
+    Simulator sim;
 
     std::vector<std::string> events;
-    UpstreamCell upstream(upstream_ready.addSlaver(), events);
-    MiddleCell middle(sink_ready.addSlaver(), upstream_ready.master(), events);
-    SinkCell sink(sink_ready.master(), events);
+    auto& upstream = sim.createComponent<UpstreamCell>(events);
+    auto& middle = sim.createComponent<MiddleCell>(events);
+    auto& sink = sim.createComponent<SinkCell>(events);
+    sim.connect(sink.sink_ready, middle.sink_ready);
+    sim.connect(middle.upstream_ready, upstream.downstream_ready);
 
-    runtime.addComponent(upstream);
-    runtime.addComponent(middle);
-    runtime.addComponent(sink);
-
-    runtime.runTick();
+    sim.tick();
 
     const std::vector<std::string> expected = {
         "upstream-wait",
@@ -193,27 +170,31 @@ void timely_backpressure_propagates_through_signal_chain() {
 }
 
 struct DeadlockedComponent final : Component {
-    Signal<bool>::Slaver signal;
+    SignalInput<bool> signal{"signal"};
 
-    explicit DeadlockedComponent(Signal<bool>::Slaver signal) : signal(signal) {}
+    Task<void> tick() override {
+        (void)co_await signal.read();
+        co_return;
+    }
+};
 
-    Task<void> tick(TickContext& ctx) override {
-        (void)co_await signal.read(ctx);
+struct UnusedSetter final : Component {
+    SignalOutput<bool> signal{"signal"};
+
+    Task<void> tick() override {
         co_return;
     }
 };
 
 void missing_signal_set_is_reported_as_deadlock() {
-    Runtime runtime;
-    Signal<bool> signal("never-set");
-    runtime.addObject(signal);
-
-    DeadlockedComponent component(signal.addSlaver());
-    runtime.addComponent(component);
+    Simulator sim;
+    auto& component = sim.createComponent<DeadlockedComponent>();
+    auto& setter = sim.createComponent<UnusedSetter>();
+    sim.connect(setter.signal, component.signal);
 
     bool threw = false;
     try {
-        runtime.runTick();
+        sim.tick();
     } catch (const std::runtime_error&) {
         threw = true;
     }

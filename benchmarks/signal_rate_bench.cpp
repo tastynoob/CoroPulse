@@ -57,76 +57,76 @@ bool coinFlip(std::uint64_t tick, std::uint64_t stage_id) {
 
 class SignalStressModule final : public Component {
 public:
-    SignalStressModule(std::string_view name, std::uint64_t stage_id,
-                       std::uint64_t work_rounds, ExecutionModel model,
-                       std::optional<Signal<Ready>::Slaver> downstream_ready,
-                       std::optional<Signal<Ready>::Master> upstream_ready,
-                       std::optional<Channel<std::uint64_t>::Slaver> input,
-                       std::optional<Channel<std::uint64_t>::Master> output)
+    SignalInput<Ready> downstream_ready{"downstream-ready"};
+    SignalOutput<Ready> upstream_ready{"upstream-ready"};
+    Input<std::uint64_t> in{"in"};
+    Output<std::uint64_t> out{"out"};
+
+    SignalStressModule(std::uint64_t stage_id, std::uint64_t work_rounds,
+                       ExecutionModel model, bool has_downstream_ready,
+                       bool has_upstream_ready, bool has_input, bool has_output)
         : stage_id_(stage_id),
           work_rounds_(work_rounds),
           model_(model),
-          downstream_ready_(downstream_ready),
-          upstream_ready_(upstream_ready),
-          input_(input),
-          output_(output),
-          state_(0x6a09e667f3bcc909ULL ^ (stage_id * 0x100000001b3ULL)) {
-        (void)name;
-    }
+          has_downstream_ready_(has_downstream_ready),
+          has_upstream_ready_(has_upstream_ready),
+          has_input_(has_input),
+          has_output_(has_output),
+          state_(0x6a09e667f3bcc909ULL ^ (stage_id * 0x100000001b3ULL)) {}
 
-    Task<void> tick(TickContext& ctx) override {
+    Task<void> tick() override {
         bool local_accept = true;
-        if (upstream_ready_) {
-            local_accept = coinFlip(ctx.tick(), stage_id_);
+        if (has_upstream_ready_) {
+            local_accept = coinFlip(currentTick(), stage_id_);
             if (local_accept) {
                 ++ready_true_;
             } else {
                 ++ready_false_;
             }
             if (model_ == ExecutionModel::CoroPulseSignal) {
-                upstream_ready_->set(ctx, Ready{local_accept});
+                upstream_ready.set(Ready{local_accept});
             }
         }
 
         bool downstream_accept = true;
-        if (downstream_ready_) {
-            const auto ready = co_await downstream_ready_->read(ctx);
+        if (has_downstream_ready_) {
+            const auto ready = co_await downstream_ready.read();
             downstream_accept = ready.can_accept;
         }
 
         std::optional<std::uint64_t> input_value;
-        if (input_ && local_accept) {
-            input_value = input_->read(ctx);
+        if (has_input_ && local_accept) {
+            input_value = in.read();
             if (input_value) {
                 ++accepted_input_;
                 state_ ^= *input_value + stage_id_ * 0x517cc1b727220a95ULL;
             }
         }
 
-        const bool should_work = !downstream_ready_ || downstream_accept;
-        const bool has_payload = !input_ || input_value.has_value();
+        const bool should_work = !has_downstream_ready_ || downstream_accept;
+        const bool has_payload = !has_input_ || input_value.has_value();
 
         if (should_work) {
             ++work_units_;
             ++sent_or_progressed_;
-            state_ ^= ctx.tick() * 0x517cc1b727220a95ULL;
+            state_ ^= currentTick() * 0x517cc1b727220a95ULL;
 
             state_ = burnCpu(state_ + stage_id_ + sent_or_progressed_, work_rounds_);
             checksum_ ^= state_ + (sent_or_progressed_ << 7) + (blocked_ << 17);
         } else {
             ++blocked_;
-            state_ ^= ctx.tick() * 0x94d049bb133111ebULL;
+            state_ ^= currentTick() * 0x94d049bb133111ebULL;
         }
 
-        if (output_ && should_work && has_payload) {
-            const auto value = state_ ^ input_value.value_or(ctx.tick() + stage_id_);
-            if (!output_->write(ctx, value)) {
+        if (has_output_ && should_work && has_payload) {
+            const auto value = state_ ^ input_value.value_or(currentTick() + stage_id_);
+            if (!out.write(value)) {
                 ++blocked_;
             }
         }
 
-        if (upstream_ready_ && model_ == ExecutionModel::TraditionalSerial) {
-            upstream_ready_->set(ctx, Ready{local_accept});
+        if (has_upstream_ready_ && model_ == ExecutionModel::TraditionalSerial) {
+            upstream_ready.set(Ready{local_accept});
         }
 
         co_return;
@@ -146,10 +146,10 @@ private:
     std::uint64_t stage_id_;
     std::uint64_t work_rounds_;
     ExecutionModel model_;
-    std::optional<Signal<Ready>::Slaver> downstream_ready_;
-    std::optional<Signal<Ready>::Master> upstream_ready_;
-    std::optional<Channel<std::uint64_t>::Slaver> input_;
-    std::optional<Channel<std::uint64_t>::Master> output_;
+    bool has_downstream_ready_;
+    bool has_upstream_ready_;
+    bool has_input_;
+    bool has_output_;
     std::uint64_t state_;
     std::uint64_t checksum_ = 0;
     std::uint64_t ready_true_ = 0;
@@ -215,37 +215,26 @@ Theory computeTheory(std::uint64_t ticks) {
 
 BenchResult runBench(std::size_t workers, std::uint64_t ticks, std::uint64_t work_rounds,
                      ExecutionModel model) {
-    Runtime runtime(workers);
+    Simulator sim(workers);
 
-    Signal<Ready> b_ready("B.ready -> A");
-    Signal<Ready> d_ready("D.ready -> C");
-    Channel<std::uint64_t> ab("A->B");
-    Channel<std::uint64_t> bc("B->C");
-    Channel<std::uint64_t> cd("C->D");
+    auto& a = sim.createComponent<SignalStressModule>(
+        1, work_rounds, model, true, false, false, true);
+    auto& b = sim.createComponent<SignalStressModule>(
+        2, work_rounds, model, false, true, true, true);
+    auto& c = sim.createComponent<SignalStressModule>(
+        3, work_rounds, model, true, false, true, true);
+    auto& d = sim.createComponent<SignalStressModule>(
+        4, work_rounds, model, false, true, true, false);
 
-    runtime.addObject(b_ready);
-    runtime.addObject(d_ready);
-    runtime.addObject(ab);
-    runtime.addObject(bc);
-    runtime.addObject(cd);
-
-    SignalStressModule a("A", 1, work_rounds, model, b_ready.addSlaver(), std::nullopt,
-                         std::nullopt, ab.master());
-    SignalStressModule b("B", 2, work_rounds, model, std::nullopt, b_ready.master(),
-                         ab.addSlaver(), bc.master());
-    SignalStressModule c("C", 3, work_rounds, model, d_ready.addSlaver(), std::nullopt,
-                         bc.addSlaver(), cd.master());
-    SignalStressModule d("D", 4, work_rounds, model, std::nullopt, d_ready.master(),
-                         cd.addSlaver(), std::nullopt);
-
-    runtime.addComponent(a);
-    runtime.addComponent(b);
-    runtime.addComponent(c);
-    runtime.addComponent(d);
+    sim.connect(b.upstream_ready, a.downstream_ready);
+    sim.connect(d.upstream_ready, c.downstream_ready);
+    sim.connect(a.out, b.in);
+    sim.connect(b.out, c.in);
+    sim.connect(c.out, d.in);
 
     const auto start = std::chrono::steady_clock::now();
     for (std::uint64_t i = 0; i < ticks; ++i) {
-        runtime.runTick();
+        sim.tick();
     }
     const auto end = std::chrono::steady_clock::now();
 

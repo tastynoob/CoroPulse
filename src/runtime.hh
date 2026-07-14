@@ -27,7 +27,28 @@ private:
 class Component {
 public:
     virtual ~Component() = default;
-    virtual Task<void> tick(TickContext& ctx) = 0;
+    virtual Task<void> tick() = 0;
+
+    TickId currentTick() const {
+        return context().tick();
+    }
+
+protected:
+    TickContext& context() const {
+        if (!ctx_) {
+            throw std::runtime_error("component tick context is not active");
+        }
+        return *ctx_;
+    }
+
+private:
+    friend class Runtime;
+
+    void clearContext() noexcept {
+        ctx_ = nullptr;
+    }
+
+    TickContext* ctx_ = nullptr;
 };
 
 class TickObject {
@@ -88,11 +109,15 @@ public:
 
         rebuildComponentOrder();
         for (const auto component_id : component_order_) {
-            scheduler_.add(components_[component_id]->tick(ctx), component_id,
-                           load_balancing_enabled_);
+            auto* component = components_[component_id];
+            component->ctx_ = &ctx;
+            scheduler_.add(component->tick(), component_id, load_balancing_enabled_, &ctx);
         }
 
         scheduler_.run();
+        for (auto* component : components_) {
+            component->clearContext();
+        }
         auto samples = scheduler_.takeSamples();
 
         for (auto* object : objects_) {

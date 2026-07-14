@@ -10,6 +10,38 @@
 namespace coropulse {
 
 class Scheduler;
+class TickContext;
+
+namespace detail {
+
+inline thread_local TickContext* current_tick_context = nullptr;
+
+inline TickContext& currentTickContext() {
+    if (!current_tick_context) {
+        throw std::runtime_error("tick context is not active");
+    }
+    return *current_tick_context;
+}
+
+class ScopedTickContext {
+public:
+    explicit ScopedTickContext(TickContext* ctx) noexcept
+        : previous_(current_tick_context) {
+        current_tick_context = ctx;
+    }
+
+    ~ScopedTickContext() {
+        current_tick_context = previous_;
+    }
+
+    ScopedTickContext(const ScopedTickContext&) = delete;
+    ScopedTickContext& operator=(const ScopedTickContext&) = delete;
+
+private:
+    TickContext* previous_;
+};
+
+} // namespace detail
 
 template <class T>
 class Task;
@@ -20,6 +52,7 @@ public:
     struct promise_type {
         Scheduler* scheduler = nullptr;
         std::exception_ptr exception;
+        TickContext* tick_context = nullptr;
         std::size_t component_id = 0;
         bool profile_active_time = false;
         std::chrono::nanoseconds active_time{0};

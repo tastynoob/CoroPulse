@@ -102,16 +102,14 @@ std::vector<std::vector<int>> buildConsumers(const std::vector<Instruction>& pro
 
 class IssueQueue final : public Component {
 public:
+    SignalInput<bool> need_wakeup{"need_wakeup"};
+    SignalInput<WakeupData> wakeup_data{"wakeup_data"};
+    Output<IssuedInstruction> issue_out{"issue_out"};
+
     IssueQueue(const std::vector<Instruction>& program,
-               const std::vector<std::vector<int>>& consumers,
-               Signal<bool>::Slaver need_wakeup,
-               Signal<WakeupData>::Slaver wakeup_data,
-               Channel<IssuedInstruction>::Master issue_out)
+               const std::vector<std::vector<int>>& consumers)
         : program_(program),
           consumers_(consumers),
-          need_wakeup_(need_wakeup),
-          wakeup_data_(wakeup_data),
-          issue_out_(issue_out),
           remaining_deps_(program.size(), 0),
           issued_(program.size(), false),
           completed_(program.size(), false) {
@@ -120,12 +118,12 @@ public:
         }
     }
 
-    Task<void> tick(TickContext& ctx) override {
-        const bool need_wakeup = co_await need_wakeup_.read(ctx);
+    Task<void> tick() override {
+        const bool wakeup_needed = co_await need_wakeup.read();
 
         std::vector<bool> became_ready_this_tick(program_.size(), false);
-        if (need_wakeup) {
-            const auto data = co_await wakeup_data_.read(ctx);
+        if (wakeup_needed) {
+            const auto data = co_await wakeup_data.read();
             ++wakeup_ticks_;
 
             for (const auto completed_id : data.completed_ids) {
@@ -151,7 +149,7 @@ public:
         }
 
         const auto& inst = program_[*candidate];
-        if (!issue_out_.write(ctx, IssuedInstruction{inst.id, inst.latency})) {
+        if (!issue_out.write(IssuedInstruction{inst.id, inst.latency})) {
             ++channel_full_stalls_;
             co_return;
         }
@@ -192,9 +190,6 @@ private:
 
     const std::vector<Instruction>& program_;
     const std::vector<std::vector<int>>& consumers_;
-    Signal<bool>::Slaver need_wakeup_;
-    Signal<WakeupData>::Slaver wakeup_data_;
-    Channel<IssuedInstruction>::Master issue_out_;
     std::vector<int> remaining_deps_;
     std::vector<bool> issued_;
     std::vector<bool> completed_;
@@ -207,26 +202,24 @@ private:
 
 class ExecuteUnit final : public Component {
 public:
-    ExecuteUnit(Channel<IssuedInstruction>::Slaver issue_in,
-                Signal<bool>::Master need_wakeup,
-                Signal<WakeupData>::Master wakeup_data,
-                std::uint64_t execute_work_rounds)
-        : issue_in_(issue_in),
-          need_wakeup_(need_wakeup),
-          wakeup_data_(wakeup_data),
-          execute_work_rounds_(execute_work_rounds) {}
+    Input<IssuedInstruction> issue_in{"issue_in"};
+    SignalOutput<bool> need_wakeup{"need_wakeup"};
+    SignalOutput<WakeupData> wakeup_data{"wakeup_data"};
 
-    Task<void> tick(TickContext& ctx) override {
+    explicit ExecuteUnit(std::uint64_t execute_work_rounds)
+        : execute_work_rounds_(execute_work_rounds) {}
+
+    Task<void> tick() override {
         WakeupData wakeup;
 
         const auto active_count = static_cast<std::uint64_t>(executing_.size());
         const auto work_rounds = execute_work_rounds_ * (active_count + 1);
-        execute_checksum_ = burnCpu(execute_checksum_ + ctx.tick() + active_count,
+        execute_checksum_ = burnCpu(execute_checksum_ + currentTick() + active_count,
                                     work_rounds);
 
         auto out = executing_.begin();
         while (out != executing_.end()) {
-            if (out->done_tick <= ctx.tick()) {
+            if (out->done_tick <= currentTick()) {
                 wakeup.completed_ids.push_back(out->id);
                 out = executing_.erase(out);
             } else {
@@ -235,19 +228,19 @@ public:
         }
 
         if (!wakeup.completed_ids.empty()) {
-            wakeup_data_.set(ctx, wakeup);
-            need_wakeup_.set(ctx, true);
+            wakeup_data.set(wakeup);
+            need_wakeup.set(true);
             completed_count_ += wakeup.completed_ids.size();
             ++wakeup_broadcasts_;
         } else {
-            need_wakeup_.set(ctx, false);
+            need_wakeup.set(false);
         }
 
-        auto issued = issue_in_.read(ctx);
+        auto issued = issue_in.read();
         if (issued) {
             executing_.push_back(Executing{
                 issued->id,
-                ctx.tick() + static_cast<TickId>(issued->latency),
+                currentTick() + static_cast<TickId>(issued->latency),
             });
             ++accepted_count_;
         }
@@ -267,9 +260,6 @@ private:
         TickId done_tick = 0;
     };
 
-    Channel<IssuedInstruction>::Slaver issue_in_;
-    Signal<bool>::Master need_wakeup_;
-    Signal<WakeupData>::Master wakeup_data_;
     std::uint64_t execute_work_rounds_;
     std::vector<Executing> executing_;
     std::uint64_t execute_checksum_ = 0x123456789abcdef0ULL;
@@ -291,26 +281,16 @@ int main(int argc, char** argv) {
     const auto program = buildProgram(instruction_count, seed);
     const auto consumers = buildConsumers(program);
 
-    Runtime runtime(static_cast<std::size_t>(workers));
-    Signal<bool> need_wakeup("need_wakeup");
-    Signal<WakeupData> wakeup_data("wakeup_data");
-    Channel<IssuedInstruction> issue_channel("A.issue -> B.execute");
-
-    runtime.addObject(need_wakeup);
-    runtime.addObject(wakeup_data);
-    runtime.addObject(issue_channel);
-
-    IssueQueue issue_queue(program, consumers, need_wakeup.addSlaver(),
-                           wakeup_data.addSlaver(), issue_channel.master());
-    ExecuteUnit execute_unit(issue_channel.addSlaver(), need_wakeup.master(),
-                             wakeup_data.master(), execute_work_rounds);
-
-    runtime.addComponent(issue_queue);
-    runtime.addComponent(execute_unit);
+    Simulator sim(static_cast<std::size_t>(workers));
+    auto& issue_queue = sim.createComponent<IssueQueue>(program, consumers);
+    auto& execute_unit = sim.createComponent<ExecuteUnit>(execute_work_rounds);
+    sim.connect(execute_unit.need_wakeup, issue_queue.need_wakeup);
+    sim.connect(execute_unit.wakeup_data, issue_queue.wakeup_data);
+    sim.connect(issue_queue.issue_out, execute_unit.issue_in);
 
     TickId ticks = 0;
     for (; ticks < max_ticks; ++ticks) {
-        runtime.runTick();
+        sim.tick();
         if (issue_queue.allIssued() && issue_queue.allCompletedSeen() && execute_unit.idle()) {
             break;
         }

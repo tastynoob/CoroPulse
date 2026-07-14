@@ -5,7 +5,6 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
-#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -42,9 +41,9 @@ public:
           work_rounds_(work_rounds),
           state_(0x123456789abcdef0ULL ^ (id * 0x100000001b3ULL)) {}
 
-    Task<void> tick(TickContext& ctx) override {
-        state_ = burnCpu(state_ + ctx.tick() + id_, work_rounds_);
-        checksum_ ^= state_ + (ctx.tick() << 11) + id_;
+    Task<void> tick() override {
+        state_ = burnCpu(state_ + currentTick() + id_, work_rounds_);
+        checksum_ ^= state_ + (currentTick() << 11) + id_;
         co_return;
     }
 
@@ -77,35 +76,33 @@ struct BenchResult {
 };
 
 BenchResult runOnce(const BenchConfig& config, bool load_balancing) {
-    Runtime runtime(4);
+    Simulator sim(4);
     if (load_balancing) {
-        runtime.enableLoadBalancing(static_cast<std::size_t>(config.window_ticks));
+        sim.enableLoadBalancing(static_cast<std::size_t>(config.window_ticks));
     }
 
-    std::vector<std::unique_ptr<WorkComponent>> components;
+    std::vector<WorkComponent*> components;
     components.reserve(static_cast<std::size_t>(config.light_components + 1));
 
     for (std::uint64_t i = 0; i < config.light_components; ++i) {
-        components.push_back(std::make_unique<WorkComponent>(i, config.light_rounds));
-        runtime.addComponent(*components.back());
+        components.push_back(&sim.createComponent<WorkComponent>(i, config.light_rounds));
     }
 
-    components.push_back(std::make_unique<WorkComponent>(
+    components.push_back(&sim.createComponent<WorkComponent>(
         config.light_components, config.heavy_rounds));
-    runtime.addComponent(*components.back());
 
     for (std::uint64_t i = 0; i < config.warmup_ticks; ++i) {
-        runtime.runTick();
+        sim.tick();
     }
 
     const auto start = std::chrono::steady_clock::now();
     for (std::uint64_t i = 0; i < config.ticks; ++i) {
-        runtime.runTick();
+        sim.tick();
     }
     const auto end = std::chrono::steady_clock::now();
 
     std::uint64_t checksum = 0;
-    for (const auto& component : components) {
+    for (const auto* component : components) {
         checksum ^= component->checksum();
     }
 
