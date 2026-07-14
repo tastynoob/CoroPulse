@@ -64,6 +64,7 @@ public:
         handle.promise().tick_context = tick_context;
         handle.promise().component_id = component_id;
         handle.promise().profile_active_time = profile_active_time;
+        handle.promise().deferred_resume = false;
         handle.promise().active_time = Duration{0};
 
         std::lock_guard lock(mutex_);
@@ -96,6 +97,14 @@ public:
             ready_.push_back(handle);
         }
         work_cv_.notify_one();
+    }
+
+    void defer(Handle handle) {
+        if (!handle) {
+            throw std::runtime_error("cannot defer an empty coroutine handle");
+        }
+
+        handle.promise().deferred_resume = true;
     }
 
     void run() {
@@ -211,6 +220,9 @@ private:
         TaskSample sample;
         bool has_sample = false;
         const bool done = !resume_exception && handle.done();
+        const bool should_defer = !resume_exception && !done &&
+                                  handle.promise().deferred_resume;
+        handle.promise().deferred_resume = false;
         if (done) {
             coroutine_exception = handle.promise().exception;
             if (handle.promise().profile_active_time) {
@@ -233,6 +245,8 @@ private:
                 handle.destroy();
                 forgetLocked(handle);
                 --live_;
+            } else if (should_defer && !stopping_ && dispatching_ && !first_exception_) {
+                ready_.push_back(handle);
             }
 
             if (resume_exception && !first_exception_) {

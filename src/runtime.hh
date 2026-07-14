@@ -24,6 +24,22 @@ private:
     Scheduler* scheduler_;
 };
 
+class YieldAwaiter {
+public:
+    explicit YieldAwaiter(TickContext& ctx) noexcept : ctx_(&ctx) {}
+
+    bool await_ready() const noexcept { return false; }
+
+    void await_suspend(Scheduler::Handle handle) const {
+        ctx_->scheduler().defer(handle);
+    }
+
+    void await_resume() const noexcept {}
+
+private:
+    TickContext* ctx_;
+};
+
 class Component {
 public:
     virtual ~Component() = default;
@@ -34,6 +50,10 @@ public:
     }
 
 protected:
+    YieldAwaiter yield() {
+        return YieldAwaiter(context());
+    }
+
     TickContext& context() const {
         if (!ctx_) {
             throw std::runtime_error("component tick context is not active");

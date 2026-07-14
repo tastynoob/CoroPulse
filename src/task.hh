@@ -55,6 +55,7 @@ public:
         TickContext* tick_context = nullptr;
         std::size_t component_id = 0;
         bool profile_active_time = false;
+        bool deferred_resume = false;
         std::chrono::nanoseconds active_time{0};
 
         Task get_return_object() noexcept {
