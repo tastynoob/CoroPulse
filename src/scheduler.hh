@@ -66,7 +66,10 @@ public:
         handle.promise().component_id = component_id;
         handle.promise().profile_active_time = false;
         handle.promise().deferred_resume = false;
+        handle.promise().persistent_wait = false;
+        handle.promise().persistent_wait_counted = false;
         handle.promise().tick_done = false;
+        handle.promise().dispatch_epoch = dispatch_epoch_;
         handle.promise().active_time = Duration{0};
 
         std::lock_guard lock(mutex_);
@@ -100,6 +103,16 @@ public:
             if (stopping_ || !dispatching_ || first_exception_) {
                 return;
             }
+            if (handle.promise().persistent_wait) {
+                handle.promise().persistent_wait = false;
+                if (handle.promise().persistent_wait_counted) {
+                    handle.promise().persistent_wait_counted = false;
+                    --sleeping_count_;
+                }
+            }
+            if (handle.promise().dispatch_epoch != dispatch_epoch_) {
+                prepareForCurrentTickLocked(handle);
+            }
             ready_.push_back(handle);
         }
         work_cv_.notify_one();
@@ -111,6 +124,16 @@ public:
         }
 
         handle.promise().deferred_resume = true;
+    }
+
+    void sleep(Handle handle) {
+        if (!handle) {
+            throw std::runtime_error("cannot sleep an empty coroutine handle");
+        }
+
+        std::lock_guard lock(mutex_);
+        handle.promise().persistent_wait = true;
+        handle.promise().persistent_wait_counted = false;
     }
 
     void run(const std::vector<std::size_t>& component_order,
@@ -139,7 +162,8 @@ public:
                 std::rethrow_exception(exception);
             }
 
-            if (active_ == 0 && ready_.empty() && live_ == next_tick_count_) {
+            if (active_ == 0 && ready_.empty() &&
+                live_ == next_tick_count_ + sleeping_count_) {
                 dispatching_ = false;
                 work_cv_.notify_all();
                 return;
@@ -185,6 +209,8 @@ private:
         }
 
         samples_.clear();
+        current_profile_active_time_ = profile_active_time;
+        ++dispatch_epoch_;
         for (const auto component_id : component_order) {
             if (component_id >= next_tick_.size()) {
                 continue;
@@ -201,11 +227,18 @@ private:
         }
 
         for (auto handle : ready_) {
-            handle.promise().profile_active_time = profile_active_time;
-            handle.promise().deferred_resume = false;
-            handle.promise().tick_done = false;
-            handle.promise().active_time = Duration{0};
+            prepareForCurrentTickLocked(handle);
         }
+    }
+
+    void prepareForCurrentTickLocked(Handle handle) {
+        handle.promise().profile_active_time = current_profile_active_time_;
+        handle.promise().deferred_resume = false;
+        handle.promise().persistent_wait = false;
+        handle.promise().persistent_wait_counted = false;
+        handle.promise().tick_done = false;
+        handle.promise().dispatch_epoch = dispatch_epoch_;
+        handle.promise().active_time = Duration{0};
     }
 
     void workerLoop() noexcept {
@@ -308,6 +341,12 @@ private:
                 next_tick_[component_id] = handle;
             } else if (should_defer && !stopping_ && dispatching_ && !first_exception_) {
                 ready_.push_back(handle);
+            } else if (handle.promise().persistent_wait && !stopping_ && dispatching_ &&
+                       !first_exception_) {
+                if (!handle.promise().persistent_wait_counted) {
+                    handle.promise().persistent_wait_counted = true;
+                    ++sleeping_count_;
+                }
             }
 
             if (resume_exception && !first_exception_) {
@@ -342,6 +381,9 @@ private:
     std::size_t live_ = 0;
     std::size_t active_ = 0;
     std::size_t next_tick_count_ = 0;
+    std::size_t sleeping_count_ = 0;
+    std::size_t dispatch_epoch_ = 0;
+    bool current_profile_active_time_ = false;
     bool dispatching_ = false;
     bool stopping_ = false;
     bool failed_ = false;

@@ -191,9 +191,138 @@ void missing_signal_set_is_reported_as_deadlock() {
     assert(threw);
 }
 
+struct DelayedWaiter final : Component {
+    SignalInput<int> signal{"signal"};
+    std::vector<std::string>& events;
+    int value = 0;
+
+    explicit DelayedWaiter(std::vector<std::string>& events) : events(events) {}
+
+    MAKE_PROCESS({
+        events.push_back("wait@" + std::to_string(currentTick()));
+        value = co_await signal.wait();
+        events.push_back("got@" + std::to_string(currentTick()));
+    })
+};
+
+struct TickThreeSetter final : Component {
+    SignalOutput<int> signal{"signal"};
+
+    MAKE_PROCESS({
+        if (currentTick() == 3) {
+            signal.set(77);
+        }
+    })
+};
+
+void signal_wait_can_resume_on_future_tick() {
+    Simulator sim;
+
+    std::vector<std::string> events;
+    auto& waiter = sim.createComponent<DelayedWaiter>(events);
+    auto& setter = sim.createComponent<TickThreeSetter>();
+    sim.connect(setter.signal, waiter.signal);
+
+    sim.tick();
+    sim.tick();
+    assert(events == std::vector<std::string>({"wait@1"}));
+
+    sim.tick();
+    assert(waiter.value == 77);
+    assert(events == std::vector<std::string>({"wait@1", "got@3"}));
+}
+
+struct ImmediateSetter final : Component {
+    SignalOutput<int> signal{"signal"};
+
+    MAKE_PROCESS({
+        signal.set(13);
+    })
+};
+
+struct ImmediateWaiter final : Component {
+    SignalInput<int> signal{"signal"};
+    int& value;
+
+    explicit ImmediateWaiter(int& value) : value(value) {}
+
+    MAKE_PROCESS({
+        value = co_await signal.wait();
+    })
+};
+
+void signal_wait_reads_value_already_set_this_tick() {
+    Simulator sim;
+
+    int value = 0;
+    auto& setter = sim.createComponent<ImmediateSetter>();
+    auto& waiter = sim.createComponent<ImmediateWaiter>(value);
+    sim.connect(setter.signal, waiter.signal);
+
+    sim.tick();
+    assert(value == 13);
+}
+
+struct VoidEventWaiter final : Component {
+    SignalInput<> event{"event"};
+    int& wake_count;
+
+    explicit VoidEventWaiter(int& wake_count) : wake_count(wake_count) {}
+
+    MAKE_PROCESS({
+        co_await event.wait();
+        ++wake_count;
+    })
+};
+
+struct TickTwoEventSetter final : Component {
+    SignalOutput<> event{"event"};
+
+    MAKE_PROCESS({
+        if (currentTick() == 2) {
+            event.set();
+        }
+    })
+};
+
+void void_signal_waits_as_event() {
+    Simulator sim;
+
+    int wake_count = 0;
+    auto& waiter = sim.createComponent<VoidEventWaiter>(wake_count);
+    auto& setter = sim.createComponent<TickTwoEventSetter>();
+    sim.connect(setter.event, waiter.event);
+
+    sim.tick();
+    assert(wake_count == 0);
+
+    sim.tick();
+    assert(wake_count == 1);
+}
+
+void void_signal_wakes_many_waiters() {
+    Simulator sim;
+
+    int wake_count = 0;
+    auto& first = sim.createComponent<VoidEventWaiter>(wake_count);
+    auto& second = sim.createComponent<VoidEventWaiter>(wake_count);
+    auto& setter = sim.createComponent<TickTwoEventSetter>();
+    sim.connect(setter.event, first.event, second.event);
+
+    sim.tick();
+    assert(wake_count == 0);
+
+    sim.tick();
+    assert(wake_count == 2);
+}
+
 int main() {
     channel_values_are_visible_next_tick();
     pending_signal_wakes_coroutine_in_same_tick();
     timely_backpressure_propagates_through_signal_chain();
     missing_signal_set_is_reported_as_deadlock();
+    signal_wait_can_resume_on_future_tick();
+    signal_wait_reads_value_already_set_this_tick();
+    void_signal_waits_as_event();
+    void_signal_wakes_many_waiters();
 }

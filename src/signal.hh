@@ -6,16 +6,67 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace coropulse {
 
 class Simulator;
-template <class T>
+template <class T = void>
+class Signal;
+template <class T = void>
 class SignalOutput;
-template <class T>
+template <class T = void>
 class SignalInput;
+
+namespace detail {
+
+template <class T>
+class SignalPayload {
+public:
+    static constexpr bool require_all_read = true;
+
+    void reset() {
+        value_.reset();
+    }
+
+    void set(T value) {
+        value_ = std::move(value);
+    }
+
+    bool ready() const noexcept {
+        return value_.has_value();
+    }
+
+    T read(const std::string& name) const {
+        if (!value_) {
+            throw std::runtime_error(objectError("signal", name, "resumed before set"));
+        }
+        return *value_;
+    }
+
+    void clear() {
+        value_.reset();
+    }
+
+private:
+    std::optional<T> value_;
+};
+
+template <>
+class SignalPayload<void> {
+public:
+    static constexpr bool require_all_read = false;
+
+    void reset() noexcept {}
+    void set() noexcept {}
+    bool ready() const noexcept { return true; }
+    void read(const std::string&) const noexcept {}
+    void clear() noexcept {}
+};
+
+} // namespace detail
 
 template <class T>
 class Signal final : public TickObject {
@@ -47,8 +98,8 @@ private:
         std::lock_guard lock(mutex_);
         tick_ = tick;
         ready_ = false;
-        value_.reset();
-        waiters_.clear();
+        payload_.reset();
+        read_waiters_.clear();
         read_by_.assign(reader_count_, false);
     }
 
@@ -56,9 +107,13 @@ private:
 
     void endTick(TickId) override {
         std::lock_guard lock(mutex_);
-        if (!waiters_.empty()) {
+        if (!read_waiters_.empty()) {
             throw std::runtime_error(
                 objectError("signal", name_, "tick ended with pending waiters"));
+        }
+
+        if constexpr (!Payload::require_all_read) {
+            return;
         }
 
         if (!ready_) {
@@ -73,16 +128,17 @@ private:
         }
     }
 
-    bool allReadLocked() const {
-        for (bool read : read_by_) {
-            if (!read) {
-                return false;
-            }
-        }
-        return true;
+    void set(TickContext& ctx) requires std::is_void_v<T> {
+        setReady(ctx);
     }
 
-    void set(TickContext& ctx, T value) {
+    template <class U = T>
+    void set(TickContext& ctx, U value) requires(!std::is_void_v<T>) {
+        setReady(ctx, std::move(value));
+    }
+
+    template <class... Args>
+    void setReady(TickContext& ctx, Args&&... args) {
         std::vector<Scheduler::Handle> waiters;
 
         {
@@ -96,9 +152,11 @@ private:
             }
 
             ready_ = true;
-            value_ = std::move(value);
-            waiters = std::move(waiters_);
-            waiters_.clear();
+            payload_.set(std::forward<Args>(args)...);
+            waiters = std::move(read_waiters_);
+            read_waiters_.clear();
+            waiters.insert(waiters.end(), wait_waiters_.begin(), wait_waiters_.end());
+            wait_waiters_.clear();
         }
 
         for (auto waiter : waiters) {
@@ -119,7 +177,8 @@ private:
         return ready_;
     }
 
-    bool awaitSuspend(std::size_t reader_id, TickContext& ctx, Scheduler::Handle handle) {
+    bool awaitSuspend(std::size_t reader_id, TickContext& ctx, Scheduler::Handle handle,
+                      bool persistent) {
         std::lock_guard lock(mutex_);
         checkReaderLocked(reader_id);
         if (ctx.tick() != tick_) {
@@ -132,29 +191,53 @@ private:
         if (ready_) {
             return false;
         }
-        waiters_.push_back(handle);
+        if (persistent) {
+            ctx.scheduler().sleep(handle);
+            wait_waiters_.push_back(handle);
+        } else {
+            read_waiters_.push_back(handle);
+        }
         return true;
     }
 
-    T awaitResume(std::size_t reader_id) {
+    auto awaitResume(std::size_t reader_id) {
         std::lock_guard lock(mutex_);
         checkReaderLocked(reader_id);
-        if (!ready_ || !value_) {
+        if (!ready_) {
             throw std::runtime_error(objectError("signal", name_, "resumed before set"));
+        }
+        if constexpr (!std::is_void_v<T>) {
+            if (!payload_.ready()) {
+                throw std::runtime_error(objectError("signal", name_, "resumed before set"));
+            }
         }
         if (read_by_[reader_id]) {
             throw std::runtime_error(
                 objectError("signal", name_, "duplicate reader read in one tick"));
         }
 
-        auto value = *value_;
-        read_by_[reader_id] = true;
+        if constexpr (std::is_void_v<T>) {
+            read_by_[reader_id] = true;
+            return;
+        } else {
+            auto value = payload_.read(name_);
+            read_by_[reader_id] = true;
 
-        if (allReadLocked()) {
-            value_.reset();
+            if (allReadLocked()) {
+                payload_.clear();
+            }
+
+            return value;
         }
+    }
 
-        return value;
+    bool allReadLocked() const {
+        for (bool read : read_by_) {
+            if (!read) {
+                return false;
+            }
+        }
+        return true;
     }
 
     void checkReaderLocked(std::size_t reader_id) const {
@@ -163,6 +246,8 @@ private:
         }
     }
 
+    using Payload = detail::SignalPayload<T>;
+
     std::string name_;
     TickId tick_ = 0;
     bool writer_connected_ = false;
@@ -170,26 +255,31 @@ private:
 
     std::mutex mutex_;
     bool ready_ = false;
-    std::optional<T> value_;
+    Payload payload_;
     std::vector<bool> read_by_;
-    std::vector<Scheduler::Handle> waiters_;
+    std::vector<Scheduler::Handle> read_waiters_;
+    std::vector<Scheduler::Handle> wait_waiters_;
 };
 
 template <class T>
 class Signal<T>::Awaiter {
 public:
-    Awaiter(Signal* signal, std::size_t reader_id, TickContext* ctx) noexcept
-        : signal_(signal), reader_id_(reader_id), ctx_(ctx) {}
+    Awaiter(Signal* signal, std::size_t reader_id, TickContext* ctx,
+            bool persistent) noexcept
+        : signal_(signal),
+          reader_id_(reader_id),
+          ctx_(ctx),
+          persistent_(persistent) {}
 
     bool await_ready() {
         return signal_->awaitReady(reader_id_, *ctx_);
     }
 
     bool await_suspend(Scheduler::Handle handle) {
-        return signal_->awaitSuspend(reader_id_, *ctx_, handle);
+        return signal_->awaitSuspend(reader_id_, *ctx_, handle, persistent_);
     }
 
-    T await_resume() {
+    auto await_resume() {
         return signal_->awaitResume(reader_id_);
     }
 
@@ -197,6 +287,7 @@ private:
     Signal* signal_;
     std::size_t reader_id_;
     TickContext* ctx_;
+    bool persistent_;
 };
 
 template <class T>
@@ -212,7 +303,13 @@ public:
         return name_;
     }
 
-    void set(T value) const {
+    void set() const requires std::is_void_v<T> {
+        ensure();
+        signal_->set(detail::currentTickContext());
+    }
+
+    template <class U = T>
+    void set(U value) const requires(!std::is_void_v<T>) {
         ensure();
         signal_->set(detail::currentTickContext(), std::move(value));
     }
@@ -255,7 +352,14 @@ public:
 
     typename Signal<T>::Awaiter read() const {
         ensure();
-        return typename Signal<T>::Awaiter(signal_, reader_id_, &detail::currentTickContext());
+        return typename Signal<T>::Awaiter(signal_, reader_id_, &detail::currentTickContext(),
+                                           false);
+    }
+
+    typename Signal<T>::Awaiter wait() const {
+        ensure();
+        return typename Signal<T>::Awaiter(signal_, reader_id_, &detail::currentTickContext(),
+                                           true);
     }
 
 private:
