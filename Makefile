@@ -10,9 +10,13 @@ TEST_BINS := $(patsubst tests/%.cpp,$(BUILD_DIR)/%,$(TEST_SRCS))
 BENCH_SRCS := $(wildcard benchmarks/*_bench.cpp)
 BENCH_BINS := $(patsubst benchmarks/%.cpp,$(BUILD_DIR)/%,$(BENCH_SRCS))
 EXAMPLE_SRCS := $(wildcard examples/*.cpp)
-EXAMPLE_BINS := $(patsubst examples/%.cpp,$(BUILD_DIR)/%,$(EXAMPLE_SRCS))
+SIMPLE_EXAMPLE_BINS := $(patsubst examples/%.cpp,$(BUILD_DIR)/%,$(EXAMPLE_SRCS))
+RISCV_CPU_SRCS := $(wildcard examples/riscv-cpu/*.cc)
+RISCV_CPU_HEADERS := $(wildcard examples/riscv-cpu/*.hh)
+RISCV_CPU_BIN := $(BUILD_DIR)/riscv_cpu
+EXAMPLE_BINS := $(SIMPLE_EXAMPLE_BINS) $(RISCV_CPU_BIN)
 
-.PHONY: all test examples issue-queue-example rate-test signal-rate-test clean
+.PHONY: all test examples issue-queue-example riscv-cpu-example rate-test signal-rate-test clean
 
 all: test
 
@@ -25,8 +29,11 @@ $(TEST_BINS): $(BUILD_DIR)/%: tests/%.cpp $(HEADERS) | $(BUILD_DIR)
 $(BENCH_BINS): $(BUILD_DIR)/%: benchmarks/%.cpp $(HEADERS) | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(THREAD_FLAGS) $< -o $@
 
-$(EXAMPLE_BINS): $(BUILD_DIR)/%: examples/%.cpp $(HEADERS) | $(BUILD_DIR)
+$(SIMPLE_EXAMPLE_BINS): $(BUILD_DIR)/%: examples/%.cpp $(HEADERS) | $(BUILD_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(THREAD_FLAGS) $< -o $@
+
+$(RISCV_CPU_BIN): $(RISCV_CPU_SRCS) $(RISCV_CPU_HEADERS) $(HEADERS) | $(BUILD_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(THREAD_FLAGS) $(RISCV_CPU_SRCS) -o $@
 
 test: $(TEST_BINS)
 	@for test in $(TEST_BINS); do ./$$test; done
@@ -36,6 +43,9 @@ examples: $(EXAMPLE_BINS)
 
 issue-queue-example: $(BUILD_DIR)/issue_queue_wakeup
 	./$(BUILD_DIR)/issue_queue_wakeup
+
+riscv-cpu-example: $(RISCV_CPU_BIN)
+	./$(RISCV_CPU_BIN)
 
 rate-test: $(BUILD_DIR)/rate_bench $(BUILD_DIR)/signal_rate_bench
 	./$(BUILD_DIR)/rate_bench
