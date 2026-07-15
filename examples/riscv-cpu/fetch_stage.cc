@@ -9,10 +9,7 @@ FetchStage::FetchStage(const SimpleSram& sram, DynInstPool& inst_pool)
 coropulse::Task<void> FetchStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
         if (auto redirect = redirect_in.read()) {
-            ++redirects_;
-            waiting_for_redirect_ = false;
-            pc_ = redirect->next_pc;
-            halted_ = redirect->halt;
+            applyRedirect(*redirect);
         }
 
         const bool decode_ready = co_await decode_can_accept.read();
@@ -25,23 +22,19 @@ coropulse::Task<void> FetchStage::process() {
             }
             continue;
         }
-        if (waiting_for_redirect_) {
-            ++control_stalls_;
-            continue;
-        }
 
         if (!pending_ && pc_ / 4 < sram_.instructionCount()) {
-            pending_ = inst_pool_.create(sram_.loadInstruction(pc_), pc_);
-            pc_ += 4;
+            const auto fetch_pc = pc_;
+            const auto predicted_next_pc = fetch_pc + 4;
+            pending_ = inst_pool_.create(sram_.loadInstruction(fetch_pc), fetch_pc,
+                                         predicted_next_pc);
+            pc_ = predicted_next_pc;
             ++fetched_;
         } else if (!pending_) {
             halted_ = true;
         }
 
         if (pending_ && out.write(pending_)) {
-            if (isControlFlow(pending_->staticInst())) {
-                waiting_for_redirect_ = true;
-            }
             pending_ = nullptr;
         }
     }
@@ -66,6 +59,13 @@ std::size_t FetchStage::redirectCount() const {
 
 bool FetchStage::halted() const noexcept {
     return halted_;
+}
+
+void FetchStage::applyRedirect(const ControlRedirect& redirect) {
+    ++redirects_;
+    pending_ = nullptr;
+    pc_ = redirect.next_pc;
+    halted_ = redirect.halt;
 }
 
 } // namespace riscv_cpu

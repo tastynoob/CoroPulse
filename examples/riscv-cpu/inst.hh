@@ -10,10 +10,11 @@ namespace riscv_cpu {
 class DynInst {
 public:
     DynInst(const StaticInst& static_inst, std::uint64_t pc,
-            std::uint64_t fetch_sequence);
+            std::uint64_t predicted_next_pc, std::uint64_t fetch_sequence);
 
     const StaticInst& staticInst() const noexcept;
     std::uint64_t pc() const noexcept;
+    std::uint64_t predictedNextPc() const noexcept;
     std::uint64_t fetchSequence() const noexcept;
 
     RenameState& renameState() noexcept;
@@ -26,6 +27,7 @@ public:
 private:
     const StaticInst* static_inst_ = nullptr;
     std::uint64_t pc_ = 0;
+    std::uint64_t predicted_next_pc_ = 0;
     std::uint64_t fetch_sequence_ = 0;
     RenameState rename_;
     ExecuteState execute_;
@@ -34,7 +36,8 @@ private:
 
 class DynInstPool {
 public:
-    DynInstPtr create(const StaticInst& static_inst, std::uint64_t pc);
+    DynInstPtr create(const StaticInst& static_inst, std::uint64_t pc,
+                      std::uint64_t predicted_next_pc);
 
 private:
     std::deque<DynInst> insts_;

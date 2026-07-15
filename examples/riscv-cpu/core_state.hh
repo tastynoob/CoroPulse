@@ -17,9 +17,13 @@ public:
 
     bool canRenameAny() const;
     void rename(DynInstPtr inst);
+    void dispatchRenamed(DynInstPtr inst);
+    void discardRenamed(DynInstPtr inst);
+    void completeRedirectFlush();
     void markCompleted(const ExecResult& result);
-    std::size_t retire(std::size_t max_count);
+    RetireResult retire(std::size_t max_count);
     std::size_t committedCount() const;
+    std::size_t inFlightCount() const;
     std::uint64_t registerValue(int reg) const;
     std::size_t freePhysicalRegisters() const;
     std::size_t physicalRegisterCount() const noexcept;
@@ -28,6 +32,7 @@ private:
     struct RegisterState {
         std::uint64_t value = 0;
         std::size_t phys = 0;
+        std::size_t committed_phys = 0;
         std::optional<std::size_t> producer;
     };
 
@@ -36,6 +41,8 @@ private:
     };
 
     Operand readSourceLocked(int reg) const;
+    void flushAfterRedirectLocked(std::size_t redirect_sequence);
+    void restoreSpeculativeRenameMapLocked();
 
     mutable std::mutex mutex_;
     std::array<RegisterState, 32> registers_{};
@@ -44,6 +51,7 @@ private:
     std::vector<RobEntry> rob_;
     std::size_t commit_head_ = 0;
     std::size_t committed_ = 0;
+    std::size_t next_sequence_ = 0;
 };
 
 } // namespace riscv_cpu

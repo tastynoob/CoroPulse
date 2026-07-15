@@ -6,10 +6,22 @@ RenameStage::RenameStage(CoreState& core) : core_(core) {}
 
 coropulse::Task<void> RenameStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
+        const bool flushing = redirect_in.read().has_value();
+        if (flushing) {
+            core_.discardRenamed(pending_);
+            pending_ = nullptr;
+            (void)in.read();
+            core_.completeRedirectFlush();
+        }
+
         const bool issue_ready = co_await issue_can_accept.read();
         const bool resource_ready = pending_ || core_.canRenameAny();
         const bool input_ready = !pending_ && issue_ready && resource_ready;
         can_accept.set(input_ready);
+
+        if (flushing) {
+            continue;
+        }
 
         if (!issue_ready && (pending_ || in.hasValue())) {
             ++issue_backpressure_stalls_;

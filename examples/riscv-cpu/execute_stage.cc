@@ -25,10 +25,15 @@ ExecuteStage::ExecuteStage(SimpleSram& sram) : sram_(sram) {}
 
 coropulse::Task<void> ExecuteStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
-        publishRedirect();
+        if (redirect_in.read()) {
+            executing_.clear();
+            pending_completion_.reset();
+            (void)issue_in.read();
+            continue;
+        }
+
         publishCompletion();
         completeReadyUop();
-        publishRedirect();
         publishCompletion();
 
         if (auto issued = issue_in.read()) {
@@ -59,14 +64,8 @@ void ExecuteStage::publishCompletion() {
     }
 }
 
-void ExecuteStage::publishRedirect() {
-    if (pending_redirect_ && redirect_out.write(*pending_redirect_)) {
-        pending_redirect_.reset();
-    }
-}
-
 void ExecuteStage::completeReadyUop() {
-    if (pending_completion_ || pending_redirect_) {
+    if (pending_completion_) {
         return;
     }
 
@@ -91,6 +90,7 @@ ExecResult ExecuteStage::execute(DynInstPtr inst) {
     result.sequence = rename.sequence;
     result.inst = inst;
     result.writes_rd = rename.writes_rd;
+    auto& execute = inst->executeState();
 
     switch (static_inst.opcode) {
     case Opcode::lui:
@@ -101,43 +101,43 @@ ExecResult ExecuteStage::execute(DynInstPtr inst) {
         break;
     case Opcode::jal:
         result.value = inst->pc() + 4;
-        pending_redirect_ = ControlRedirect{branchTarget(inst->pc(), static_inst.imm), false};
+        execute.redirect = ControlRedirect{branchTarget(inst->pc(), static_inst.imm), false};
         break;
     case Opcode::jalr:
         result.value = inst->pc() + 4;
-        pending_redirect_ =
+        execute.redirect =
             ControlRedirect{addSignedImmediate(src1, static_inst.imm) & ~std::uint64_t{1},
                             false};
         break;
     case Opcode::beq:
-        pending_redirect_ = ControlRedirect{
+        execute.redirect = ControlRedirect{
             src1 == src2 ? branchTarget(inst->pc(), static_inst.imm) : inst->pc() + 4,
             false};
         break;
     case Opcode::bne:
-        pending_redirect_ = ControlRedirect{
+        execute.redirect = ControlRedirect{
             src1 != src2 ? branchTarget(inst->pc(), static_inst.imm) : inst->pc() + 4,
             false};
         break;
     case Opcode::blt:
-        pending_redirect_ = ControlRedirect{
+        execute.redirect = ControlRedirect{
             signed_src1 < signed_src2 ? branchTarget(inst->pc(), static_inst.imm)
                                       : inst->pc() + 4,
             false};
         break;
     case Opcode::bge:
-        pending_redirect_ = ControlRedirect{
+        execute.redirect = ControlRedirect{
             signed_src1 >= signed_src2 ? branchTarget(inst->pc(), static_inst.imm)
                                        : inst->pc() + 4,
             false};
         break;
     case Opcode::bltu:
-        pending_redirect_ = ControlRedirect{
+        execute.redirect = ControlRedirect{
             src1 < src2 ? branchTarget(inst->pc(), static_inst.imm) : inst->pc() + 4,
             false};
         break;
     case Opcode::bgeu:
-        pending_redirect_ = ControlRedirect{
+        execute.redirect = ControlRedirect{
             src1 >= src2 ? branchTarget(inst->pc(), static_inst.imm) : inst->pc() + 4,
             false};
         break;
@@ -270,10 +270,15 @@ ExecResult ExecuteStage::execute(DynInstPtr inst) {
         break;
     case Opcode::ecall:
     case Opcode::ebreak:
-        pending_redirect_ = ControlRedirect{inst->pc() + 4, true};
+        execute.redirect = ControlRedirect{inst->pc() + 4, true};
         break;
     case Opcode::illegal:
         break;
+    }
+
+    if (execute.redirect && !execute.redirect->halt &&
+        execute.redirect->next_pc == inst->predictedNextPc()) {
+        execute.redirect.reset();
     }
 
     return result;

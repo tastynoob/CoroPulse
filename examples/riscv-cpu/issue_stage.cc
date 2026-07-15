@@ -6,6 +6,15 @@ IssueStage::IssueStage(std::size_t capacity) : capacity_(capacity) {}
 
 coropulse::Task<void> IssueStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
+        if (redirect_in.read()) {
+            queue_.clear();
+            completed_.clear();
+            (void)completion_in.read();
+            (void)rename_in.read();
+            can_accept.set(true);
+            continue;
+        }
+
         if (auto completion = completion_in.read()) {
             rememberCompletion(*completion);
         }

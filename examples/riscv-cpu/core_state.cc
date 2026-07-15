@@ -2,6 +2,7 @@
 
 #include "inst.hh"
 
+#include <sstream>
 #include <stdexcept>
 
 namespace riscv_cpu {
@@ -14,6 +15,7 @@ CoreState::CoreState(std::size_t physical_registers)
 
     for (std::size_t i = 0; i < registers_.size(); ++i) {
         registers_[i].phys = i;
+        registers_[i].committed_phys = i;
     }
     for (std::size_t phys = registers_.size(); phys < physical_registers; ++phys) {
         free_phys_regs_.push_back(phys);
@@ -31,15 +33,13 @@ void CoreState::rename(DynInstPtr dyn_inst) {
         throw std::runtime_error("rename received a null dyninst");
     }
 
-    const auto sequence = rob_.size();
+    const auto sequence = next_sequence_++;
     const auto& inst = dyn_inst->staticInst();
     const bool writes = writesRd(inst) && inst.rd != 0;
 
     if (writes && free_phys_regs_.empty()) {
         throw std::runtime_error("rename ran out of physical registers");
     }
-
-    rob_.push_back(RobEntry{dyn_inst});
 
     auto& rename = dyn_inst->renameState();
     rename.sequence = sequence;
@@ -64,6 +64,52 @@ void CoreState::rename(DynInstPtr dyn_inst) {
     }
 }
 
+void CoreState::dispatchRenamed(DynInstPtr dyn_inst) {
+    std::lock_guard lock(mutex_);
+    if (!dyn_inst) {
+        throw std::runtime_error("dispatch received a null dyninst");
+    }
+
+    auto& rename = dyn_inst->renameState();
+    if (rename.dispatched) {
+        throw std::runtime_error("dyninst was dispatched twice");
+    }
+    if (rename.sequence != rob_.size()) {
+        std::ostringstream os;
+        os << "dispatch sequence does not match rob tail: sequence="
+           << rename.sequence << ", rob_tail=" << rob_.size();
+        throw std::runtime_error(os.str());
+    }
+
+    rename.dispatched = true;
+    rob_.push_back(RobEntry{dyn_inst});
+}
+
+void CoreState::discardRenamed(DynInstPtr dyn_inst) {
+    std::lock_guard lock(mutex_);
+    if (!dyn_inst) {
+        return;
+    }
+
+    auto& rename = dyn_inst->renameState();
+    if (rename.dispatched || rename.discarded) {
+        return;
+    }
+    rename.discarded = true;
+    if (rename.writes_rd) {
+        free_phys_regs_.push_back(rename.phys_dst);
+    }
+    if (rename.sequence >= rob_.size()) {
+        next_sequence_ = rob_.size();
+    }
+}
+
+void CoreState::completeRedirectFlush() {
+    std::lock_guard lock(mutex_);
+    next_sequence_ = rob_.size();
+    restoreSpeculativeRenameMapLocked();
+}
+
 void CoreState::markCompleted(const ExecResult& result) {
     std::lock_guard lock(mutex_);
     if (result.sequence >= rob_.size()) {
@@ -77,11 +123,11 @@ void CoreState::markCompleted(const ExecResult& result) {
     entry.inst->commitState().completed = true;
 }
 
-std::size_t CoreState::retire(std::size_t max_count) {
+RetireResult CoreState::retire(std::size_t max_count) {
     std::lock_guard lock(mutex_);
 
-    std::size_t retired = 0;
-    while (retired < max_count && commit_head_ < rob_.size()) {
+    RetireResult result;
+    while (result.retired < max_count && commit_head_ < rob_.size()) {
         const auto& entry = rob_[commit_head_];
         if (!entry.inst->commitState().completed) {
             break;
@@ -89,25 +135,38 @@ std::size_t CoreState::retire(std::size_t max_count) {
 
         const auto& inst = entry.inst->staticInst();
         const auto& rename = entry.inst->renameState();
+        const auto& execute = entry.inst->executeState();
         if (rename.writes_rd) {
             auto& reg = registers_[static_cast<std::size_t>(inst.rd)];
-            free_phys_regs_.push_back(rename.old_phys_dst);
+            free_phys_regs_.push_back(reg.committed_phys);
+            reg.committed_phys = rename.phys_dst;
+            reg.value = execute.value;
             if (reg.producer && *reg.producer == rename.sequence) {
-                reg.value = entry.inst->executeState().value;
                 reg.producer.reset();
             }
         }
 
         ++commit_head_;
         ++committed_;
-        ++retired;
+        ++result.retired;
+
+        if (execute.redirect) {
+            result.redirect = execute.redirect;
+            flushAfterRedirectLocked(rename.sequence);
+            break;
+        }
     }
-    return retired;
+    return result;
 }
 
 std::size_t CoreState::committedCount() const {
     std::lock_guard lock(mutex_);
     return committed_;
+}
+
+std::size_t CoreState::inFlightCount() const {
+    std::lock_guard lock(mutex_);
+    return rob_.size() - commit_head_;
 }
 
 std::uint64_t CoreState::registerValue(int reg) const {
@@ -134,6 +193,9 @@ Operand CoreState::readSourceLocked(int reg) const {
 
     const auto& state = registers_[static_cast<std::size_t>(reg)];
     if (state.producer) {
+        if (*state.producer >= rob_.size()) {
+            return Operand{false, 0, *state.producer};
+        }
         const auto* producer = rob_.at(*state.producer).inst;
         if (producer->commitState().completed) {
             return Operand{true, producer->executeState().value, 0};
@@ -141,6 +203,27 @@ Operand CoreState::readSourceLocked(int reg) const {
         return Operand{false, 0, *state.producer};
     }
     return Operand{true, state.value, 0};
+}
+
+void CoreState::flushAfterRedirectLocked(std::size_t redirect_sequence) {
+    for (std::size_t i = redirect_sequence + 1; i < rob_.size(); ++i) {
+        const auto* inst = rob_[i].inst;
+        if (inst && inst->renameState().writes_rd) {
+            free_phys_regs_.push_back(inst->renameState().phys_dst);
+        }
+    }
+
+    rob_.resize(redirect_sequence + 1);
+    commit_head_ = rob_.size();
+    next_sequence_ = rob_.size();
+    restoreSpeculativeRenameMapLocked();
+}
+
+void CoreState::restoreSpeculativeRenameMapLocked() {
+    for (auto& reg : registers_) {
+        reg.phys = reg.committed_phys;
+        reg.producer.reset();
+    }
 }
 
 } // namespace riscv_cpu

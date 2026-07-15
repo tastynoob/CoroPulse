@@ -14,7 +14,7 @@ namespace riscv_cpu {
 
 class FetchStage final : public coropulse::Component {
 public:
-    coropulse::Input<ControlRedirect> redirect_in{"execute_to_fetch"};
+    coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
     coropulse::SignalInput<bool> decode_can_accept{"decode_can_accept"};
     coropulse::Output<DynInstPtr> out{"fetch_to_decode"};
 
@@ -28,6 +28,8 @@ public:
     bool halted() const noexcept;
 
 private:
+    void applyRedirect(const ControlRedirect& redirect);
+
     const SimpleSram& sram_;
     DynInstPool& inst_pool_;
     std::uint64_t pc_ = 0;
@@ -35,13 +37,13 @@ private:
     std::size_t backpressure_stalls_ = 0;
     std::size_t control_stalls_ = 0;
     std::size_t redirects_ = 0;
-    bool waiting_for_redirect_ = false;
     bool halted_ = false;
     DynInstPtr pending_ = nullptr;
 };
 
 class DecodeStage final : public coropulse::Component {
 public:
+    coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
     coropulse::Input<DynInstPtr> in{"fetch_to_decode"};
     coropulse::SignalInput<bool> rename_can_accept{"rename_can_accept"};
     coropulse::SignalOutput<bool> can_accept{"decode_can_accept"};
@@ -60,6 +62,7 @@ private:
 
 class RenameStage final : public coropulse::Component {
 public:
+    coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
     coropulse::Input<DynInstPtr> in{"decode_to_rename"};
     coropulse::SignalInput<bool> issue_can_accept{"issue_can_accept"};
     coropulse::SignalOutput<bool> can_accept{"rename_can_accept"};
@@ -82,6 +85,7 @@ private:
 
 class IssueStage final : public coropulse::Component {
 public:
+    coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
     coropulse::Input<DynInstPtr> rename_in{"rename_to_issue"};
     coropulse::Input<ExecResult> completion_in{"execute_to_commit"};
     coropulse::SignalOutput<bool> can_accept{"issue_can_accept"};
@@ -121,8 +125,8 @@ private:
 
 class ExecuteStage final : public coropulse::Component {
 public:
+    coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
     coropulse::Input<DynInstPtr> issue_in{"issue_to_execute"};
-    coropulse::Output<ControlRedirect> redirect_out{"execute_to_fetch"};
     coropulse::Output<ExecResult> completion_out{"execute_to_commit"};
 
     explicit ExecuteStage(SimpleSram& sram);
@@ -138,13 +142,11 @@ private:
     };
 
     void publishCompletion();
-    void publishRedirect();
     void completeReadyUop();
     ExecResult execute(DynInstPtr inst);
 
     SimpleSram& sram_;
     std::vector<Executing> executing_;
-    std::optional<ControlRedirect> pending_redirect_;
     std::optional<ExecResult> pending_completion_;
     std::size_t accepted_ = 0;
     std::size_t completed_ = 0;
@@ -152,17 +154,23 @@ private:
 
 class CommitStage final : public coropulse::Component {
 public:
+    coropulse::Input<DynInstPtr> dispatch_in{"rename_to_issue"};
     coropulse::Input<ExecResult> completion_in{"execute_to_commit"};
+    coropulse::Output<ControlRedirect> redirect_out{"commit_redirect"};
 
     CommitStage(CoreState& core, std::size_t commit_width);
     coropulse::Task<void> process() override;
 
     std::size_t retiredCount() const;
+    std::size_t redirectCount() const;
 
 private:
     CoreState& core_;
     std::size_t commit_width_;
+    std::optional<ControlRedirect> pending_redirect_;
     std::size_t retired_ = 0;
+    std::size_t redirects_ = 0;
+    bool flush_next_tick_ = false;
 };
 
 } // namespace riscv_cpu

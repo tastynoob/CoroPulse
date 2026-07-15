@@ -3,9 +3,10 @@
 namespace riscv_cpu {
 
 DynInst::DynInst(const StaticInst& static_inst, std::uint64_t pc,
-                 std::uint64_t fetch_sequence)
+                 std::uint64_t predicted_next_pc, std::uint64_t fetch_sequence)
     : static_inst_(&static_inst),
       pc_(pc),
+      predicted_next_pc_(predicted_next_pc),
       fetch_sequence_(fetch_sequence) {}
 
 const StaticInst& DynInst::staticInst() const noexcept {
@@ -14,6 +15,10 @@ const StaticInst& DynInst::staticInst() const noexcept {
 
 std::uint64_t DynInst::pc() const noexcept {
     return pc_;
+}
+
+std::uint64_t DynInst::predictedNextPc() const noexcept {
+    return predicted_next_pc_;
 }
 
 std::uint64_t DynInst::fetchSequence() const noexcept {
@@ -44,8 +49,9 @@ const CommitState& DynInst::commitState() const noexcept {
     return commit_;
 }
 
-DynInstPtr DynInstPool::create(const StaticInst& static_inst, std::uint64_t pc) {
-    insts_.emplace_back(static_inst, pc, next_fetch_sequence_++);
+DynInstPtr DynInstPool::create(const StaticInst& static_inst, std::uint64_t pc,
+                               std::uint64_t predicted_next_pc) {
+    insts_.emplace_back(static_inst, pc, predicted_next_pc, next_fetch_sequence_++);
     return &insts_.back();
 }
 

@@ -67,10 +67,11 @@ int main(int argc, char** argv) {
 
     sim.connect(fetch.out, decode.in);
     sim.connect(decode.out, rename.in);
-    sim.connect(rename.out, issue.rename_in);
+    sim.connect(rename.out, issue.rename_in, commit.dispatch_in);
     sim.connect(issue.issue_out, execute.issue_in);
-    sim.connect(execute.redirect_out, fetch.redirect_in);
     sim.connect(execute.completion_out, issue.completion_in, commit.completion_in);
+    sim.connect(commit.redirect_out, fetch.redirect_in, decode.redirect_in,
+                rename.redirect_in, issue.redirect_in, execute.redirect_in);
     sim.connect(issue.can_accept, rename.issue_can_accept);
     sim.connect(rename.can_accept, decode.rename_can_accept);
     sim.connect(decode.can_accept, fetch.decode_can_accept);
@@ -80,7 +81,8 @@ int main(int argc, char** argv) {
     const auto start = std::chrono::steady_clock::now();
     for (; ticks < tick_limit; ++ticks) {
         sim.tick();
-        completed = fetch.halted() && core.committedCount() == fetch.fetchedCount();
+        completed = fetch.halted() && core.inFlightCount() == 0 &&
+                    fetch.redirectCount() == commit.redirectCount();
         if (completed) {
             break;
         }
@@ -111,6 +113,7 @@ int main(int argc, char** argv) {
               << ", execute_accept=" << execute.acceptedCount()
               << ", execute_complete=" << execute.completedCount()
               << ", commit=" << commit.retiredCount()
+              << ", commit_redirects=" << commit.redirectCount()
               << ", issue_output_stalls=" << issue.outputStalls() << '\n';
     std::cout << "fetch_backpressure_stalls=" << fetch.backpressureStalls()
               << ", fetch_control_stalls=" << fetch.controlStalls()

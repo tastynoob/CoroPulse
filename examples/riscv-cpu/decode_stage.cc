@@ -4,9 +4,19 @@ namespace riscv_cpu {
 
 coropulse::Task<void> DecodeStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
+        const bool flushing = redirect_in.read().has_value();
+        if (flushing) {
+            pending_ = nullptr;
+            (void)in.read();
+        }
+
         const bool rename_ready = co_await rename_can_accept.read();
         const bool input_ready = !pending_ && rename_ready;
         can_accept.set(input_ready);
+
+        if (flushing) {
+            continue;
+        }
 
         if (!rename_ready && (pending_ || in.hasValue())) {
             ++backpressure_stalls_;
