@@ -7,11 +7,10 @@
 #include "stages.hh"
 
 #include <chrono>
-#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <vector>
+#include <utility>
 
 namespace {
 
@@ -19,6 +18,13 @@ std::size_t parseTraceLimit(const std::string& arg) {
     const auto prefix = std::string{"--trace-limit="};
     if (arg.rfind(prefix, 0) != 0) {
         throw std::runtime_error("invalid trace limit option: " + arg);
+    }
+    return static_cast<std::size_t>(std::stoull(arg.substr(prefix.size())));
+}
+
+std::size_t parseSizeOption(const std::string& arg, const std::string& prefix) {
+    if (arg.rfind(prefix, 0) != 0) {
+        throw std::runtime_error("invalid size option: " + arg);
     }
     return static_cast<std::size_t>(std::stoull(arg.substr(prefix.size())));
 }
@@ -42,22 +48,30 @@ int main(int argc, char** argv) {
         {"core", {
             {"physical_registers", 64},
             {"issue_capacity", 16},
-            {"commit_width", 1},
+            {"fetch_width", 4},
+            {"fetch_decode_fifo_capacity", 16},
+            {"decode_width", 4},
+            {"rename_width", 4},
+            {"issue_width", 4},
+            {"commit_width", 4},
         }},
         {"memory", {
             {"data_bytes", 16 * 1024 * 1024},
-            {"initial_word0", 10},
-        }},
-        {"program", {
-            {"synthetic_instructions", 0},
-            {"print_limit", 32},
         }},
     };
 
     std::string raw_path;
     bool trace = false;
     std::size_t trace_limit = 0;
+    std::size_t workers_override = 0;
     coropulse::TickId max_ticks_override = 0;
+    std::size_t fetch_width_override = 0;
+    std::size_t fifo_capacity_override = 0;
+    std::size_t decode_width_override = 0;
+    std::size_t rename_width_override = 0;
+    std::size_t issue_capacity_override = 0;
+    std::size_t issue_width_override = 0;
+    std::size_t commit_width_override = 0;
     for (int i = 1; i < argc; ++i) {
         const auto arg = std::string(argv[i]);
         if (arg == "--trace") {
@@ -67,27 +81,35 @@ int main(int argc, char** argv) {
             trace_limit = parseTraceLimit(arg);
         } else if (arg.rfind("--max-ticks=", 0) == 0) {
             max_ticks_override = parseMaxTicks(arg);
+        } else if (arg.rfind("--workers=", 0) == 0) {
+            workers_override = parseSizeOption(arg, "--workers=");
+        } else if (arg.rfind("--fetch-width=", 0) == 0) {
+            fetch_width_override = parseSizeOption(arg, "--fetch-width=");
+        } else if (arg.rfind("--fifo-capacity=", 0) == 0) {
+            fifo_capacity_override = parseSizeOption(arg, "--fifo-capacity=");
+        } else if (arg.rfind("--decode-width=", 0) == 0) {
+            decode_width_override = parseSizeOption(arg, "--decode-width=");
+        } else if (arg.rfind("--rename-width=", 0) == 0) {
+            rename_width_override = parseSizeOption(arg, "--rename-width=");
+        } else if (arg.rfind("--issue-capacity=", 0) == 0) {
+            issue_capacity_override = parseSizeOption(arg, "--issue-capacity=");
+        } else if (arg.rfind("--issue-width=", 0) == 0) {
+            issue_width_override = parseSizeOption(arg, "--issue-width=");
+        } else if (arg.rfind("--commit-width=", 0) == 0) {
+            commit_width_override = parseSizeOption(arg, "--commit-width=");
         } else if (raw_path.empty()) {
             raw_path = arg;
         } else {
             throw std::runtime_error("unexpected argument: " + arg);
         }
     }
-    const bool raw_program = !raw_path.empty();
-    const auto synthetic_instructions =
-        params["program"]["synthetic_instructions"].as<std::size_t>();
-    const bool synthetic = !raw_program && synthetic_instructions != 0;
-
-    std::vector<std::uint8_t> raw_image;
-    std::vector<riscv_cpu::StaticInst> program;
-    if (raw_program) {
-        raw_image = riscv_cpu::loadRawImage(raw_path);
-    } else {
-        program = synthetic ? riscv_cpu::buildSyntheticProgram(synthetic_instructions)
-                            : riscv_cpu::buildProgram();
+    if (raw_path.empty()) {
+        throw std::runtime_error(
+            "missing raw program image path; usage: riscv_cpu <program.bin> [options]");
     }
-    const auto instruction_count =
-        raw_program ? raw_image.size() / 4 : program.size();
+
+    auto raw_image = riscv_cpu::loadRawImage(raw_path);
+    const auto instruction_count = raw_image.size() / 4;
 
     const auto configured_max_ticks =
         max_ticks_override != 0 ? max_ticks_override
@@ -95,54 +117,76 @@ int main(int argc, char** argv) {
     const auto tick_limit =
         configured_max_ticks != 0
             ? configured_max_ticks
-            : (raw_program
-                   ? static_cast<coropulse::TickId>(100000000)
-                   : static_cast<coropulse::TickId>(instruction_count * 12 + 1000));
+            : static_cast<coropulse::TickId>(100000000);
 
-    auto make_sram = [&]() {
-        if (raw_program) {
-            return riscv_cpu::SimpleSram(
-                raw_image, params["memory"]["data_bytes"].as<std::size_t>());
-        }
-        return riscv_cpu::SimpleSram(
-            program, params["memory"]["data_bytes"].as<std::size_t>());
-    };
-    auto sram = make_sram();
-    if (!raw_program) {
-        sram.store64(0, params["memory"]["initial_word0"].as<std::uint64_t>());
-    }
+    riscv_cpu::SimpleSram sram(
+        std::move(raw_image), params["memory"]["data_bytes"].as<std::size_t>());
 
     riscv_cpu::CoreState core(params["core"]["physical_registers"].as<std::size_t>());
     riscv_cpu::DynInstPool inst_pool;
-    coropulse::Simulator sim(params["sim"]["workers"].as<std::size_t>());
+    const auto workers = workers_override != 0
+                             ? workers_override
+                             : params["sim"]["workers"].as<std::size_t>();
+    coropulse::Simulator sim(workers);
 
-    auto& fetch = sim.createComponent<riscv_cpu::FetchStage>(sram, inst_pool);
+    const auto issue_capacity =
+        issue_capacity_override != 0
+            ? issue_capacity_override
+            : params["core"]["issue_capacity"].as<std::size_t>();
+    const auto fetch_width =
+        fetch_width_override != 0 ? fetch_width_override
+                                  : params["core"]["fetch_width"].as<std::size_t>();
+    const auto fifo_capacity =
+        fifo_capacity_override != 0
+            ? fifo_capacity_override
+            : params["core"]["fetch_decode_fifo_capacity"].as<std::size_t>();
+    const auto decode_width =
+        decode_width_override != 0 ? decode_width_override
+                                   : params["core"]["decode_width"].as<std::size_t>();
+    const auto rename_width =
+        rename_width_override != 0 ? rename_width_override
+                                   : params["core"]["rename_width"].as<std::size_t>();
+    const auto issue_width =
+        issue_width_override != 0 ? issue_width_override
+                                  : params["core"]["issue_width"].as<std::size_t>();
+    const auto commit_width =
+        commit_width_override != 0 ? commit_width_override
+                                   : params["core"]["commit_width"].as<std::size_t>();
+
+    auto& fetch = sim.createComponent<riscv_cpu::FetchStage>(
+        sram, inst_pool, fetch_width);
+    auto& fetch_decode_fifo = sim.createComponent<riscv_cpu::FetchDecodeFifo>(
+        fifo_capacity, fetch_width, decode_width);
     auto& decode = sim.createComponent<riscv_cpu::DecodeStage>();
-    auto& rename = sim.createComponent<riscv_cpu::RenameStage>(core);
+    auto& rename = sim.createComponent<riscv_cpu::RenameStage>(core, rename_width);
     auto& issue = sim.createComponent<riscv_cpu::IssueStage>(
-        params["core"]["issue_capacity"].as<std::size_t>());
+        core, issue_capacity, rename_width, issue_width);
     auto& execute = sim.createComponent<riscv_cpu::ExecuteStage>(sram);
     auto& commit = sim.createComponent<riscv_cpu::CommitStage>(
-        core, sram, params["core"]["commit_width"].as<std::size_t>(),
-        trace ? &std::cerr : nullptr, trace_limit);
+        core, sram, commit_width, trace ? &std::cerr : nullptr, trace_limit);
 
-    sim.connect(fetch.out, decode.in);
+    sim.connect(fetch.out, fetch_decode_fifo.in);
+    sim.connect(fetch_decode_fifo.out, decode.in);
     sim.connect(decode.out, rename.in);
     sim.connect(rename.out, issue.rename_in, commit.dispatch_in);
     sim.connect(issue.issue_out, execute.issue_in);
     sim.connect(execute.completion_out, issue.completion_in, commit.completion_in);
     sim.connect(commit.redirect_out, fetch.redirect_in, decode.redirect_in,
-                rename.redirect_in, issue.redirect_in, execute.redirect_in);
+                fetch_decode_fifo.redirect_in, rename.redirect_in, issue.redirect_in,
+                execute.redirect_in);
+    sim.connect(fetch_decode_fifo.can_accept, fetch.fifo_can_accept);
+    sim.connect(decode.can_accept, fetch_decode_fifo.decode_can_accept);
     sim.connect(issue.can_accept, rename.issue_can_accept);
     sim.connect(rename.can_accept, decode.rename_can_accept);
-    sim.connect(decode.can_accept, fetch.decode_can_accept);
+
+    sim.enableLoadBalancing(5);
 
     coropulse::TickId ticks = 0;
     bool completed = false;
     const auto start = std::chrono::steady_clock::now();
     for (; ticks < tick_limit; ++ticks) {
         sim.tick();
-        completed = fetch.halted() && core.inFlightCount() == 0 &&
+        completed = fetch.architecturalHalted() && core.inFlightCount() == 0 &&
                     fetch.redirectCount() == commit.redirectCount();
         if (completed) {
             break;
@@ -152,11 +196,17 @@ int main(int argc, char** argv) {
     const std::chrono::duration<double> elapsed = end - start;
 
     std::cout << "simple cpu microarchitecture example\n";
-    std::cout << "source=" << (raw_program ? raw_path : (synthetic ? "synthetic" : "builtin"))
-              << ", workers=" << params["sim"]["workers"].as<std::size_t>()
+    std::cout << "source=" << raw_path
+              << ", workers=" << workers
               << ", instructions=" << instruction_count
               << ", physical_registers=" << core.physicalRegisterCount()
-              << ", issue_capacity=" << params["core"]["issue_capacity"].as<std::size_t>()
+              << ", issue_capacity=" << issue_capacity
+              << ", fetch_width=" << fetch_width
+              << ", fetch_decode_fifo_capacity=" << fifo_capacity
+              << ", decode_width=" << decode_width
+              << ", rename_width=" << rename_width
+              << ", issue_width=" << issue_width
+              << ", commit_width=" << commit_width
               << ", ticks=" << (ticks + 1)
               << ", fetched=" << fetch.fetchedCount()
               << ", committed=" << core.committedCount()
@@ -175,6 +225,8 @@ int main(int argc, char** argv) {
               << ", execute_complete=" << execute.completedCount()
               << ", commit=" << commit.retiredCount()
               << ", commit_redirects=" << commit.redirectCount()
+              << ", fetch_decode_fifo_max=" << fetch_decode_fifo.maxOccupancy()
+              << ", fetch_decode_fifo_stalls=" << fetch_decode_fifo.overflowStalls()
               << ", issue_output_stalls=" << issue.outputStalls() << '\n';
     std::cout << "fetch_backpressure_stalls=" << fetch.backpressureStalls()
               << ", fetch_control_stalls=" << fetch.controlStalls()
@@ -190,34 +242,11 @@ int main(int argc, char** argv) {
               << ", x7=" << core.registerValue(7)
               << ", x10=" << core.registerValue(10)
               << ", mem[8]=" << sram.load64(8) << '\n';
-    if (raw_program) {
-        std::cout << "program: raw image, lazy decoded by fetch\n";
-    } else {
-        riscv_cpu::printProgram(program, std::cout,
-                                params["program"]["print_limit"].as<std::size_t>());
-    }
+    std::cout << "program: raw image, lazy decoded by fetch\n";
 
     if (!completed) {
         std::cerr << "cpu example did not drain before max_ticks="
                   << tick_limit << '\n';
-        return 1;
-    }
-
-    bool valid_state = true;
-    if (synthetic) {
-        for (int reg = 1; reg < 32; ++reg) {
-            if (core.registerValue(reg) !=
-                riscv_cpu::syntheticRegisterValue(instruction_count, reg)) {
-                valid_state = false;
-                break;
-            }
-        }
-    } else if (!raw_program) {
-        valid_state = core.registerValue(7) == 30 && sram.load64(8) == 30;
-    }
-
-    if (!valid_state) {
-        std::cerr << "cpu example produced an unexpected architectural state\n";
         return 1;
     }
 

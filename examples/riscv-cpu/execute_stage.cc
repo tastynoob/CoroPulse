@@ -27,23 +27,24 @@ coropulse::Task<void> ExecuteStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
         if (redirect_in.read()) {
             executing_.clear();
-            pending_completion_.reset();
+            pending_completion_.clear();
             (void)issue_in.read();
             continue;
         }
 
         publishCompletion();
-        completeReadyUop();
+        completeReadyUops();
         publishCompletion();
 
         if (auto issued = issue_in.read()) {
-            auto* inst = *issued;
-            inst->executeState().done_tick = currentTick() + inst->staticInst().latency;
-            executing_.push_back(Executing{
-                inst,
-                inst->executeState().done_tick,
-            });
-            ++accepted_;
+            for (auto* inst : *issued) {
+                inst->executeState().done_tick = currentTick() + inst->staticInst().latency;
+                executing_.push_back(Executing{
+                    inst,
+                    inst->executeState().done_tick,
+                });
+            }
+            accepted_ += issued->size();
         }
     }
     co_return;
@@ -58,22 +59,23 @@ std::size_t ExecuteStage::completedCount() const {
 }
 
 void ExecuteStage::publishCompletion() {
-    if (pending_completion_ && completion_out.write(*pending_completion_)) {
-        pending_completion_.reset();
-        ++completed_;
+    if (!pending_completion_.empty() && completion_out.write(pending_completion_)) {
+        completed_ += pending_completion_.size();
+        pending_completion_.clear();
     }
 }
 
-void ExecuteStage::completeReadyUop() {
-    if (pending_completion_) {
+void ExecuteStage::completeReadyUops() {
+    if (!pending_completion_.empty()) {
         return;
     }
 
-    for (auto iter = executing_.begin(); iter != executing_.end(); ++iter) {
+    for (auto iter = executing_.begin(); iter != executing_.end();) {
         if (iter->done_tick <= currentTick()) {
-            pending_completion_ = execute(iter->inst);
+            pending_completion_.push_back(execute(iter->inst));
             executing_.erase(iter);
-            return;
+        } else {
+            ++iter;
         }
     }
 }

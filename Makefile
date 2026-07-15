@@ -14,7 +14,7 @@ SIMPLE_EXAMPLE_BINS := $(patsubst examples/%.cpp,$(BUILD_DIR)/%,$(EXAMPLE_SRCS))
 RISCV_CPU_SRCS := $(wildcard examples/riscv-cpu/*.cc)
 RISCV_CPU_HEADERS := $(wildcard examples/riscv-cpu/*.hh)
 RISCV_CPU_BIN := $(BUILD_DIR)/riscv_cpu
-EXAMPLE_BINS := $(SIMPLE_EXAMPLE_BINS) $(RISCV_CPU_BIN)
+RISCV_CPU_RAW ?=
 
 .PHONY: all test examples issue-queue-example riscv-cpu-example rate-test signal-rate-test clean
 
@@ -38,14 +38,16 @@ $(RISCV_CPU_BIN): $(RISCV_CPU_SRCS) $(RISCV_CPU_HEADERS) $(HEADERS) | $(BUILD_DI
 test: $(TEST_BINS)
 	@for test in $(TEST_BINS); do ./$$test; done
 
-examples: $(EXAMPLE_BINS)
-	@for example in $(EXAMPLE_BINS); do ./$$example; done
+examples: $(SIMPLE_EXAMPLE_BINS) $(RISCV_CPU_BIN)
+	@for example in $(SIMPLE_EXAMPLE_BINS); do ./$$example; done
 
 issue-queue-example: $(BUILD_DIR)/issue_queue_wakeup
 	./$(BUILD_DIR)/issue_queue_wakeup
 
 riscv-cpu-example: $(RISCV_CPU_BIN)
-	./$(RISCV_CPU_BIN)
+	@test -n "$(RISCV_CPU_RAW)" || \
+		(echo "set RISCV_CPU_RAW=/path/to/program.bin" >&2; exit 1)
+	./$(RISCV_CPU_BIN) $(RISCV_CPU_RAW)
 
 rate-test: $(BUILD_DIR)/rate_bench $(BUILD_DIR)/signal_rate_bench
 	./$(BUILD_DIR)/rate_bench

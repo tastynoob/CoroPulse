@@ -35,10 +35,6 @@ std::uint64_t sliceBytes(std::uint64_t value, std::uint64_t address,
 
 } // namespace
 
-SimpleSram::SimpleSram(std::vector<StaticInst> program, std::size_t data_bytes)
-    : program_(std::move(program)),
-      data_(data_bytes, 0) {}
-
 SimpleSram::SimpleSram(std::vector<std::uint8_t> image, std::size_t data_bytes)
     : instruction_bytes_(std::move(image)),
       decoded_cache_(instruction_bytes_.size() / 4),
@@ -54,10 +50,7 @@ SimpleSram::SimpleSram(std::vector<std::uint8_t> image, std::size_t data_bytes)
 }
 
 std::size_t SimpleSram::instructionCount() const noexcept {
-    if (!instruction_bytes_.empty()) {
-        return instruction_bytes_.size() / 4;
-    }
-    return program_.size();
+    return instruction_bytes_.size() / 4;
 }
 
 const StaticInst& SimpleSram::loadInstruction(std::uint64_t pc) const {
@@ -65,13 +58,6 @@ const StaticInst& SimpleSram::loadInstruction(std::uint64_t pc) const {
         throw std::runtime_error("instruction fetch pc is not aligned");
     }
     const auto index = static_cast<std::size_t>(pc / 4);
-    if (instruction_bytes_.empty()) {
-        if (index >= program_.size()) {
-            throw std::runtime_error("instruction fetch out of range");
-        }
-        return program_[index];
-    }
-
     std::lock_guard lock(mutex_);
     if (index >= decoded_cache_.size()) {
         throw std::runtime_error("instruction fetch out of range");

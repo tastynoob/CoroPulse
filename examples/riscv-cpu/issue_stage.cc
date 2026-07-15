@@ -1,8 +1,22 @@
 #include "stages.hh"
 
+#include <stdexcept>
+
 namespace riscv_cpu {
 
-IssueStage::IssueStage(std::size_t capacity) : capacity_(capacity) {}
+IssueStage::IssueStage(CoreState& core, std::size_t capacity, std::size_t dispatch_width,
+                       std::size_t issue_width)
+    : core_(core),
+      capacity_(capacity),
+      dispatch_width_(dispatch_width),
+      issue_width_(issue_width) {
+    if (capacity_ == 0 || dispatch_width_ == 0 || issue_width_ == 0) {
+        throw std::runtime_error("issue capacity and widths must be greater than zero");
+    }
+    if (capacity_ < dispatch_width_) {
+        throw std::runtime_error("issue capacity must cover dispatch width");
+    }
+}
 
 coropulse::Task<void> IssueStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
@@ -15,34 +29,43 @@ coropulse::Task<void> IssueStage::process() {
             continue;
         }
 
-        if (auto completion = completion_in.read()) {
-            rememberCompletion(*completion);
+        if (auto completions = completion_in.read()) {
+            rememberCompletions(*completions);
         }
 
-        const auto ready = findReady();
-        if (ready) {
-            auto& entry = queue_[*ready];
-            auto& rename = entry.inst->renameState();
-            rename.src1 = entry.src1;
-            rename.src2 = entry.src2;
+        const auto ready = findReadyBundle();
+        if (!ready.empty()) {
+            InstBundle bundle;
+            bundle.reserve(ready.size());
+            for (auto index : ready) {
+                auto& entry = queue_[index];
+                auto& rename = entry.inst->renameState();
+                rename.src1 = entry.src1;
+                rename.src2 = entry.src2;
+                bundle.push_back(entry.inst);
+            }
 
-            if (issue_out.write(entry.inst)) {
-                queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(*ready));
-                ++issued_;
+            if (issue_out.write(std::move(bundle))) {
+                for (auto iter = ready.rbegin(); iter != ready.rend(); ++iter) {
+                    queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(*iter));
+                }
+                issued_ += ready.size();
             } else {
                 ++output_stalls_;
             }
         }
 
-        const bool input_ready = queue_.size() < capacity_;
+        const bool input_ready = queue_.size() + dispatch_width_ <= capacity_;
         can_accept.set(input_ready);
 
         if (input_ready) {
-            if (auto renamed = rename_in.read()) {
-                auto entry = makeEntry(*renamed);
-                applyKnownWakeups(entry);
-                queue_.push_back(entry);
-                ++accepted_;
+            if (auto renamed_bundle = rename_in.read()) {
+                for (auto* renamed : *renamed_bundle) {
+                    auto entry = makeEntry(renamed);
+                    applyKnownWakeups(entry);
+                    queue_.push_back(entry);
+                }
+                accepted_ += renamed_bundle->size();
             }
         }
     }
@@ -65,19 +88,28 @@ bool IssueStage::operandsReady(const IssueEntry& entry) const {
     return entry.src1.ready && entry.src2.ready;
 }
 
-std::optional<std::size_t> IssueStage::findReady() const {
-    bool older_memory_waiting = false;
+bool IssueStage::canIssue(const IssueEntry& entry) const {
+    if (!operandsReady(entry)) {
+        return false;
+    }
+    if (!entry.memory) {
+        return true;
+    }
+    return core_.memoryOrderReady(entry.inst->renameState().sequence);
+}
+
+std::vector<std::size_t> IssueStage::findReadyBundle() const {
+    std::vector<std::size_t> ready;
     for (std::size_t i = 0; i < queue_.size(); ++i) {
         const auto& entry = queue_[i];
-        const bool memory_blocked = entry.memory && older_memory_waiting;
-        if (operandsReady(entry) && !memory_blocked) {
-            return i;
-        }
-        if (entry.memory) {
-            older_memory_waiting = true;
+        if (canIssue(entry)) {
+            ready.push_back(i);
+            if (ready.size() >= issue_width_) {
+                break;
+            }
         }
     }
-    return std::nullopt;
+    return ready;
 }
 
 IssueStage::IssueEntry IssueStage::makeEntry(DynInstPtr inst) const {
@@ -96,6 +128,12 @@ void IssueStage::rememberCompletion(const ExecResult& completion) {
     }
     completed_[completion.sequence] = completion;
     applyWakeup(completion);
+}
+
+void IssueStage::rememberCompletions(const ExecResultBundle& completions) {
+    for (const auto& completion : completions) {
+        rememberCompletion(completion);
+    }
 }
 
 void IssueStage::applyWakeup(const ExecResult& completion) {

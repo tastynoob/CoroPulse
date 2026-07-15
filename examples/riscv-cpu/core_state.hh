@@ -22,6 +22,7 @@ public:
     void completeRedirectFlush();
     void markCompleted(const ExecResult& result);
     RetireResult retire(std::size_t max_count);
+    bool memoryOrderReady(std::size_t sequence) const;
     std::size_t committedCount() const;
     std::size_t inFlightCount() const;
     std::uint64_t registerValue(int reg) const;

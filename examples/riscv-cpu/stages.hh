@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <iosfwd>
 #include <optional>
 #include <vector>
@@ -16,10 +17,10 @@ namespace riscv_cpu {
 class FetchStage final : public coropulse::Component {
 public:
     coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
-    coropulse::SignalInput<bool> decode_can_accept{"decode_can_accept"};
-    coropulse::Output<DynInstPtr> out{"fetch_to_decode"};
+    coropulse::SignalInput<bool> fifo_can_accept{"fetch_decode_fifo_can_accept"};
+    coropulse::Output<InstBundle> out{"fetch_to_fifo"};
 
-    FetchStage(const SimpleSram& sram, DynInstPool& inst_pool);
+    FetchStage(const SimpleSram& sram, DynInstPool& inst_pool, std::size_t fetch_width);
     coropulse::Task<void> process() override;
 
     std::size_t fetchedCount() const;
@@ -27,28 +28,57 @@ public:
     std::size_t controlStalls() const;
     std::size_t redirectCount() const;
     bool halted() const noexcept;
+    bool architecturalHalted() const noexcept;
 
 private:
     void applyRedirect(const ControlRedirect& redirect);
 
     const SimpleSram& sram_;
     DynInstPool& inst_pool_;
+    std::size_t fetch_width_;
     std::uint64_t pc_ = 0;
     std::size_t fetched_ = 0;
     std::size_t backpressure_stalls_ = 0;
     std::size_t control_stalls_ = 0;
     std::size_t redirects_ = 0;
     bool halted_ = false;
-    DynInstPtr pending_ = nullptr;
+    bool architectural_halted_ = false;
+};
+
+class FetchDecodeFifo final : public coropulse::Component {
+public:
+    coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
+    coropulse::Input<InstBundle> in{"fetch_to_fifo"};
+    coropulse::SignalInput<bool> decode_can_accept{"decode_can_accept"};
+    coropulse::SignalOutput<bool> can_accept{"fetch_decode_fifo_can_accept"};
+    coropulse::Output<InstBundle> out{"fifo_to_decode"};
+
+    FetchDecodeFifo(std::size_t capacity, std::size_t fetch_width,
+                    std::size_t decode_width);
+    coropulse::Task<void> process() override;
+
+    std::size_t maxOccupancy() const;
+    std::size_t overflowStalls() const;
+
+private:
+    bool canAcceptFetch() const;
+    InstBundle popDecodeBundle();
+
+    std::size_t capacity_;
+    std::size_t fetch_width_;
+    std::size_t decode_width_;
+    std::deque<DynInstPtr> queue_;
+    std::size_t max_occupancy_ = 0;
+    std::size_t overflow_stalls_ = 0;
 };
 
 class DecodeStage final : public coropulse::Component {
 public:
     coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
-    coropulse::Input<DynInstPtr> in{"fetch_to_decode"};
+    coropulse::Input<InstBundle> in{"fifo_to_decode"};
     coropulse::SignalInput<bool> rename_can_accept{"rename_can_accept"};
     coropulse::SignalOutput<bool> can_accept{"decode_can_accept"};
-    coropulse::Output<DynInstPtr> out{"decode_to_rename"};
+    coropulse::Output<InstBundle> out{"decode_to_rename"};
 
     coropulse::Task<void> process() override;
 
@@ -58,18 +88,17 @@ public:
 private:
     std::size_t decoded_ = 0;
     std::size_t backpressure_stalls_ = 0;
-    DynInstPtr pending_ = nullptr;
 };
 
 class RenameStage final : public coropulse::Component {
 public:
     coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
-    coropulse::Input<DynInstPtr> in{"decode_to_rename"};
+    coropulse::Input<InstBundle> in{"decode_to_rename"};
     coropulse::SignalInput<bool> issue_can_accept{"issue_can_accept"};
     coropulse::SignalOutput<bool> can_accept{"rename_can_accept"};
-    coropulse::Output<DynInstPtr> out{"rename_to_issue"};
+    coropulse::Output<InstBundle> out{"rename_to_issue"};
 
-    explicit RenameStage(CoreState& core);
+    RenameStage(CoreState& core, std::size_t rename_width);
     coropulse::Task<void> process() override;
 
     std::size_t renamedCount() const;
@@ -78,21 +107,22 @@ public:
 
 private:
     CoreState& core_;
+    std::size_t rename_width_;
     std::size_t renamed_ = 0;
     std::size_t resource_stalls_ = 0;
     std::size_t issue_backpressure_stalls_ = 0;
-    DynInstPtr pending_ = nullptr;
 };
 
 class IssueStage final : public coropulse::Component {
 public:
     coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
-    coropulse::Input<DynInstPtr> rename_in{"rename_to_issue"};
-    coropulse::Input<ExecResult> completion_in{"execute_to_commit"};
+    coropulse::Input<InstBundle> rename_in{"rename_to_issue"};
+    coropulse::Input<ExecResultBundle> completion_in{"execute_to_commit"};
     coropulse::SignalOutput<bool> can_accept{"issue_can_accept"};
-    coropulse::Output<DynInstPtr> issue_out{"issue_to_execute"};
+    coropulse::Output<InstBundle> issue_out{"issue_to_execute"};
 
-    explicit IssueStage(std::size_t capacity);
+    IssueStage(CoreState& core, std::size_t capacity, std::size_t dispatch_width,
+               std::size_t issue_width);
     coropulse::Task<void> process() override;
 
     std::size_t issuedCount() const;
@@ -108,15 +138,20 @@ private:
     };
 
     bool operandsReady(const IssueEntry& entry) const;
-    std::optional<std::size_t> findReady() const;
+    bool canIssue(const IssueEntry& entry) const;
+    std::vector<std::size_t> findReadyBundle() const;
     IssueEntry makeEntry(DynInstPtr inst) const;
     void rememberCompletion(const ExecResult& completion);
+    void rememberCompletions(const ExecResultBundle& completions);
     void applyWakeup(const ExecResult& completion);
     void applyKnownWakeups(IssueEntry& entry) const;
     void applyKnownWakeup(Operand& operand) const;
     void wakeOperand(Operand& operand, const ExecResult& completion);
 
+    CoreState& core_;
     std::size_t capacity_;
+    std::size_t dispatch_width_;
+    std::size_t issue_width_;
     std::vector<IssueEntry> queue_;
     std::vector<std::optional<ExecResult>> completed_;
     std::size_t accepted_ = 0;
@@ -127,8 +162,8 @@ private:
 class ExecuteStage final : public coropulse::Component {
 public:
     coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
-    coropulse::Input<DynInstPtr> issue_in{"issue_to_execute"};
-    coropulse::Output<ExecResult> completion_out{"execute_to_commit"};
+    coropulse::Input<InstBundle> issue_in{"issue_to_execute"};
+    coropulse::Output<ExecResultBundle> completion_out{"execute_to_commit"};
 
     explicit ExecuteStage(SimpleSram& sram);
     coropulse::Task<void> process() override;
@@ -143,20 +178,20 @@ private:
     };
 
     void publishCompletion();
-    void completeReadyUop();
+    void completeReadyUops();
     ExecResult execute(DynInstPtr inst);
 
     SimpleSram& sram_;
     std::vector<Executing> executing_;
-    std::optional<ExecResult> pending_completion_;
+    ExecResultBundle pending_completion_;
     std::size_t accepted_ = 0;
     std::size_t completed_ = 0;
 };
 
 class CommitStage final : public coropulse::Component {
 public:
-    coropulse::Input<DynInstPtr> dispatch_in{"rename_to_issue"};
-    coropulse::Input<ExecResult> completion_in{"execute_to_commit"};
+    coropulse::Input<InstBundle> dispatch_in{"rename_to_issue"};
+    coropulse::Input<ExecResultBundle> completion_in{"execute_to_commit"};
     coropulse::Output<ControlRedirect> redirect_out{"commit_redirect"};
 
     CommitStage(CoreState& core, SimpleSram& sram, std::size_t commit_width,

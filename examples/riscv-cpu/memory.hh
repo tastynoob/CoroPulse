@@ -12,7 +12,6 @@ namespace riscv_cpu {
 
 class SimpleSram {
 public:
-    explicit SimpleSram(std::vector<StaticInst> program, std::size_t data_bytes);
     explicit SimpleSram(std::vector<std::uint8_t> image, std::size_t data_bytes);
 
     std::size_t instructionCount() const noexcept;
@@ -32,7 +31,6 @@ private:
                          std::size_t bytes);
     void checkAccess(std::uint64_t address, std::size_t bytes) const;
 
-    std::vector<StaticInst> program_;
     std::vector<std::uint8_t> instruction_bytes_;
     mutable std::vector<StaticInst> decoded_cache_;
     mutable std::vector<bool> decoded_valid_;

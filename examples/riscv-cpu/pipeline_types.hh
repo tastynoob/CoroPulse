@@ -12,6 +12,7 @@ namespace riscv_cpu {
 
 class DynInst;
 using DynInstPtr = DynInst*;
+using InstBundle = std::vector<DynInstPtr>;
 
 struct Operand {
     bool ready = true;
@@ -60,6 +61,8 @@ struct ExecResult {
     bool writes_rd = false;
     std::optional<StoreWrite> store;
 };
+
+using ExecResultBundle = std::vector<ExecResult>;
 
 struct RetiredInstTrace {
     std::size_t sequence = 0;

@@ -1,45 +1,49 @@
 #include "stages.hh"
 
+#include <stdexcept>
+
 namespace riscv_cpu {
 
-RenameStage::RenameStage(CoreState& core) : core_(core) {}
+RenameStage::RenameStage(CoreState& core, std::size_t rename_width)
+    : core_(core),
+      rename_width_(rename_width) {
+    if (rename_width_ == 0) {
+        throw std::runtime_error("rename width must be greater than zero");
+    }
+}
 
 coropulse::Task<void> RenameStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
         const bool flushing = redirect_in.read().has_value();
         if (flushing) {
-            core_.discardRenamed(pending_);
-            pending_ = nullptr;
             (void)in.read();
             core_.completeRedirectFlush();
         }
 
         const bool issue_ready = co_await issue_can_accept.read();
-        const bool resource_ready = pending_ || core_.canRenameAny();
-        const bool input_ready = !pending_ && issue_ready && resource_ready;
+        const bool resource_ready = core_.freePhysicalRegisters() >= rename_width_;
+        const bool input_ready = issue_ready && resource_ready && out.canWrite();
         can_accept.set(input_ready);
 
         if (flushing) {
             continue;
         }
 
-        if (!issue_ready && (pending_ || in.hasValue())) {
+        if (!issue_ready && in.hasValue()) {
             ++issue_backpressure_stalls_;
         }
-        if (!resource_ready) {
+        if (!resource_ready && in.hasValue()) {
             ++resource_stalls_;
         }
 
-        if (!pending_ && input_ready) {
+        if (input_ready) {
             if (auto decoded = in.read()) {
-                pending_ = *decoded;
-                core_.rename(pending_);
-                ++renamed_;
+                for (auto* inst : *decoded) {
+                    core_.rename(inst);
+                }
+                renamed_ += decoded->size();
+                (void)out.write(std::move(*decoded));
             }
-        }
-
-        if (pending_ && issue_ready && out.write(pending_)) {
-            pending_ = nullptr;
         }
     }
     co_return;

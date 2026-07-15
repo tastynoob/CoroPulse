@@ -4,6 +4,30 @@
 #include <ostream>
 
 namespace riscv_cpu {
+namespace {
+
+void discardBundle(CoreState& core, const std::optional<InstBundle>& bundle) {
+    if (!bundle) {
+        return;
+    }
+    for (auto* inst : *bundle) {
+        core.discardRenamed(inst);
+    }
+}
+
+void dispatchBundle(CoreState& core, const InstBundle& bundle) {
+    for (auto* inst : bundle) {
+        core.dispatchRenamed(inst);
+    }
+}
+
+void markCompletedBundle(CoreState& core, const ExecResultBundle& bundle) {
+    for (const auto& completion : bundle) {
+        core.markCompleted(completion);
+    }
+}
+
+} // namespace
 
 CommitStage::CommitStage(CoreState& core, SimpleSram& sram, std::size_t commit_width,
                          std::ostream* trace_out, std::size_t trace_limit)
@@ -26,23 +50,19 @@ coropulse::Task<void> CommitStage::process() {
                 flush_next_tick_ = true;
                 ++redirects_;
             } else {
-                if (dispatch) {
-                    core_.discardRenamed(*dispatch);
-                }
+                discardBundle(core_, dispatch);
                 flush_next_tick_ = true;
                 continue;
             }
         }
 
         if (flushing) {
-            if (dispatch) {
-                core_.discardRenamed(*dispatch);
-            }
+            discardBundle(core_, dispatch);
             continue;
         }
 
         if (completion) {
-            core_.markCompleted(*completion);
+            markCompletedBundle(core_, *completion);
         }
 
         const auto result = core_.retire(commit_width_);
@@ -54,9 +74,7 @@ coropulse::Task<void> CommitStage::process() {
         }
         retired_ += result.retired;
         if (result.redirect) {
-            if (dispatch) {
-                core_.discardRenamed(*dispatch);
-            }
+            discardBundle(core_, dispatch);
 
             pending_redirect_ = result.redirect;
             if (redirect_out.write(*pending_redirect_)) {
@@ -68,7 +86,7 @@ coropulse::Task<void> CommitStage::process() {
         }
 
         if (dispatch) {
-            core_.dispatchRenamed(*dispatch);
+            dispatchBundle(core_, *dispatch);
         }
     }
     co_return;

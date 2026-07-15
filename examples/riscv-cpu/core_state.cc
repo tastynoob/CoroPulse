@@ -174,6 +174,20 @@ RetireResult CoreState::retire(std::size_t max_count) {
     return result;
 }
 
+bool CoreState::memoryOrderReady(std::size_t sequence) const {
+    std::lock_guard lock(mutex_);
+    if (sequence >= rob_.size()) {
+        return false;
+    }
+    for (std::size_t i = commit_head_; i < sequence; ++i) {
+        const auto* inst = rob_[i].inst;
+        if (inst && isMemory(inst->staticInst())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::size_t CoreState::committedCount() const {
     std::lock_guard lock(mutex_);
     return committed_;

@@ -6,31 +6,26 @@ coropulse::Task<void> DecodeStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
         const bool flushing = redirect_in.read().has_value();
         if (flushing) {
-            pending_ = nullptr;
             (void)in.read();
         }
 
         const bool rename_ready = co_await rename_can_accept.read();
-        const bool input_ready = !pending_ && rename_ready;
+        const bool input_ready = rename_ready && out.canWrite();
         can_accept.set(input_ready);
 
         if (flushing) {
             continue;
         }
 
-        if (!rename_ready && (pending_ || in.hasValue())) {
+        if (!input_ready && in.hasValue()) {
             ++backpressure_stalls_;
         }
 
-        if (!pending_ && input_ready) {
+        if (input_ready) {
             if (auto fetched = in.read()) {
-                pending_ = *fetched;
-                ++decoded_;
+                decoded_ += fetched->size();
+                (void)out.write(std::move(*fetched));
             }
-        }
-
-        if (pending_ && rename_ready && out.write(pending_)) {
-            pending_ = nullptr;
         }
     }
     co_return;
