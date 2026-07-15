@@ -26,11 +26,45 @@ public:
         Duration active_time{0};
     };
 
+    struct ProfilingStats {
+        Duration elapsed_time{0};
+        Duration worker_idle_time{0};
+        Duration worker_capacity_time{0};
+        std::size_t worker_count = 0;
+        std::size_t tick_count = 0;
+
+        double idleRatio() const noexcept {
+            const auto total_time = static_cast<double>(worker_capacity_time.count());
+            if (total_time <= 0.0) {
+                return 0.0;
+            }
+
+            const auto ratio =
+                static_cast<double>(worker_idle_time.count()) / total_time;
+            if (ratio < 0.0) {
+                return 0.0;
+            }
+            if (ratio > 1.0) {
+                return 1.0;
+            }
+            return ratio;
+        }
+
+        void accumulate(const ProfilingStats& stats) noexcept {
+            elapsed_time += stats.elapsed_time;
+            worker_idle_time += stats.worker_idle_time;
+            worker_capacity_time += stats.worker_capacity_time;
+            tick_count += stats.tick_count;
+            worker_count = stats.worker_count;
+        }
+    };
+
     explicit Scheduler(std::size_t worker_count = 1)
         : worker_count_(worker_count == 0 ? 1 : worker_count) {
         workers_.reserve(worker_count_);
+        worker_idle_since_.resize(worker_count_);
         for (std::size_t i = 0; i < worker_count_; ++i) {
-            workers_.emplace_back([this] { workerLoop(); });
+            workers_.emplace_back([this, i] { workerLoop(i); });
         }
     }
 
@@ -147,12 +181,14 @@ public:
         }
 
         startTickLocked(component_order, profile_active_time);
+        startTickStatsLocked();
         dispatching_ = true;
         work_cv_.notify_all();
 
         while (true) {
             if (first_exception_) {
                 failed_ = true;
+                finishTickStatsLocked(Clock::now());
                 dispatching_ = false;
                 work_cv_.notify_all();
                 done_cv_.wait(lock, [this] { return active_ == 0; });
@@ -164,6 +200,7 @@ public:
 
             if (active_ == 0 && ready_.empty() &&
                 live_ == next_tick_count_ + sleeping_count_) {
+                finishTickStatsLocked(Clock::now());
                 dispatching_ = false;
                 work_cv_.notify_all();
                 return;
@@ -171,6 +208,7 @@ public:
 
             if (ready_.empty() && active_ == 0) {
                 failed_ = true;
+                finishTickStatsLocked(Clock::now());
                 dispatching_ = false;
                 first_exception_ = std::make_exception_ptr(std::runtime_error(
                     "deadlock: current tick drained while coroutine(s) are still waiting"));
@@ -192,6 +230,11 @@ public:
 
     std::size_t workerCount() const noexcept { return worker_count_; }
 
+    double workerIdleRatio() const {
+        std::lock_guard lock(mutex_);
+        return profiling_stats_.idleRatio();
+    }
+
     std::vector<TaskSample> takeSamples() {
         std::lock_guard lock(mutex_);
         std::vector<TaskSample> samples;
@@ -201,6 +244,7 @@ public:
 
 private:
     using Clock = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
 
     void startTickLocked(const std::vector<std::size_t>& component_order,
                          bool profile_active_time) {
@@ -231,6 +275,53 @@ private:
         }
     }
 
+    void startTickStatsLocked() {
+        current_tick_start_ = Clock::now();
+        current_worker_idle_time_ = Duration{0};
+        for (auto& idle_since : worker_idle_since_) {
+            idle_since = TimePoint{};
+        }
+    }
+
+    void finishTickStatsLocked(TimePoint end_time) {
+        closeIdleIntervalsLocked(end_time);
+        profiling_stats_.accumulate(ProfilingStats{
+            std::chrono::duration_cast<Duration>(end_time - current_tick_start_),
+            current_worker_idle_time_,
+            std::chrono::duration_cast<Duration>((end_time - current_tick_start_) *
+                                                 worker_count_),
+            worker_count_,
+            1,
+        });
+    }
+
+    void startWorkerIdleLocked(std::size_t worker_index) {
+        if (worker_idle_since_[worker_index] == TimePoint{}) {
+            worker_idle_since_[worker_index] = Clock::now();
+        }
+    }
+
+    void stopWorkerIdleLocked(std::size_t worker_index) {
+        if (worker_idle_since_[worker_index] != TimePoint{}) {
+            stopWorkerIdleLocked(worker_index, Clock::now());
+        }
+    }
+
+    void stopWorkerIdleLocked(std::size_t worker_index, TimePoint end_time) {
+        auto& idle_since = worker_idle_since_[worker_index];
+        if (idle_since != TimePoint{}) {
+            current_worker_idle_time_ +=
+                std::chrono::duration_cast<Duration>(end_time - idle_since);
+            idle_since = TimePoint{};
+        }
+    }
+
+    void closeIdleIntervalsLocked(TimePoint end_time) {
+        for (std::size_t i = 0; i < worker_idle_since_.size(); ++i) {
+            stopWorkerIdleLocked(i, end_time);
+        }
+    }
+
     void prepareForCurrentTickLocked(Handle handle) {
         handle.promise().profile_active_time = current_profile_active_time_;
         handle.promise().deferred_resume = false;
@@ -241,23 +332,34 @@ private:
         handle.promise().active_time = Duration{0};
     }
 
-    void workerLoop() noexcept {
+    void workerLoop(std::size_t worker_index) noexcept {
         for (;;) {
             Handle handle{};
 
             {
                 std::unique_lock lock(mutex_);
-                work_cv_.wait(lock, [this] {
-                    return stopping_ || (dispatching_ && !first_exception_ && !ready_.empty());
-                });
+                for (;;) {
+                    if (stopping_) {
+                        stopWorkerIdleLocked(worker_index);
+                        return;
+                    }
 
-                if (stopping_) {
-                    return;
+                    if (dispatching_ && !first_exception_ && !ready_.empty()) {
+                        stopWorkerIdleLocked(worker_index);
+                        handle = ready_.front();
+                        ready_.pop_front();
+                        ++active_;
+                        break;
+                    }
+
+                    if (dispatching_ && !first_exception_ && ready_.empty()) {
+                        startWorkerIdleLocked(worker_index);
+                    } else {
+                        stopWorkerIdleLocked(worker_index);
+                    }
+
+                    work_cv_.wait(lock);
                 }
-
-                handle = ready_.front();
-                ready_.pop_front();
-                ++active_;
             }
 
             runOne(handle);
@@ -378,6 +480,10 @@ private:
     std::vector<Handle> next_tick_;
     std::vector<Handle> owned_;
     std::vector<TaskSample> samples_;
+    std::vector<TimePoint> worker_idle_since_;
+    ProfilingStats profiling_stats_;
+    TimePoint current_tick_start_;
+    Duration current_worker_idle_time_{0};
     std::size_t live_ = 0;
     std::size_t active_ = 0;
     std::size_t next_tick_count_ = 0;

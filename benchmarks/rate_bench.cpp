@@ -96,6 +96,7 @@ struct BenchResult {
     std::uint64_t work_rounds;
     double seconds;
     double ticks_per_second;
+    double idle_ratio;
     std::uint64_t checksum;
 };
 
@@ -123,6 +124,7 @@ BenchResult runBench(std::size_t workers, std::uint64_t ticks, std::uint64_t wor
         work_rounds,
         seconds,
         static_cast<double>(ticks) / seconds,
+        sim.workerIdleRatio(),
         a.checksum() ^ b.checksum() ^ c.checksum() ^ d.checksum(),
     };
 }
@@ -133,6 +135,8 @@ void printResult(const BenchResult& result, double baseline_seconds) {
               << std::setw(14) << std::fixed << std::setprecision(4) << result.seconds
               << std::setw(16) << std::fixed << std::setprecision(1) << result.ticks_per_second
               << std::setw(12) << std::fixed << std::setprecision(2) << speedup
+              << std::setw(11) << std::fixed << std::setprecision(1)
+              << (result.idle_ratio * 100.0)
               << "    0x" << std::hex << result.checksum << std::dec << '\n';
 }
 
@@ -151,6 +155,7 @@ int main(int argc, char** argv) {
               << std::setw(14) << "seconds"
               << std::setw(16) << "ticks/s"
               << std::setw(12) << "speedup"
+              << std::setw(11) << "idle%"
               << "    checksum\n";
 
     double baseline_seconds = 0.0;

@@ -148,6 +148,10 @@ public:
         return runtime_.tick();
     }
 
+    double workerIdleRatio() const {
+        return runtime_.workerIdleRatio();
+    }
+
 private:
     void ensureMutableTopology() const {
         if (topology_frozen_) {

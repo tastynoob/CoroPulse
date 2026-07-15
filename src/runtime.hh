@@ -128,6 +128,10 @@ public:
 
     TickId tick() const noexcept { return tick_; }
 
+    double workerIdleRatio() const {
+        return scheduler_.workerIdleRatio();
+    }
+
     void runTick() {
         ++tick_;
 
