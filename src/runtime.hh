@@ -7,14 +7,22 @@
 #include <cstddef>
 #include <deque>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace coropulse {
 
 class TickContext {
 public:
+    TickContext() = default;
+
     TickContext(TickId tick, Scheduler& scheduler) noexcept
         : tick_(tick), scheduler_(&scheduler) {}
+
+    void reset(TickId tick, Scheduler& scheduler) noexcept {
+        tick_ = tick;
+        scheduler_ = &scheduler;
+    }
 
     TickId tick() const noexcept { return tick_; }
     Scheduler& scheduler() const noexcept { return *scheduler_; }
@@ -24,9 +32,9 @@ private:
     Scheduler* scheduler_;
 };
 
-class YieldAwaiter {
+class SwitchOutAwaiter {
 public:
-    explicit YieldAwaiter(TickContext& ctx) noexcept : ctx_(&ctx) {}
+    explicit SwitchOutAwaiter(TickContext& ctx) noexcept : ctx_(&ctx) {}
 
     bool await_ready() const noexcept { return false; }
 
@@ -43,15 +51,15 @@ private:
 class Component {
 public:
     virtual ~Component() = default;
-    virtual Task<void> tick() = 0;
+    virtual Task<void> process() = 0;
 
     TickId currentTick() const {
         return context().tick();
     }
 
 protected:
-    YieldAwaiter yield() {
-        return YieldAwaiter(context());
+    SwitchOutAwaiter switchOut() {
+        return SwitchOutAwaiter(context());
     }
 
     TickContext& context() const {
@@ -63,10 +71,6 @@ protected:
 
 private:
     friend class Runtime;
-
-    void clearContext() noexcept {
-        ctx_ = nullptr;
-    }
 
     TickContext* ctx_ = nullptr;
 };
@@ -83,7 +87,9 @@ class Runtime {
 public:
     explicit Runtime(std::size_t worker_count = 1)
         : worker_count_(worker_count == 0 ? 1 : worker_count),
-          scheduler_(worker_count_) {}
+          scheduler_(worker_count_) {
+        tick_context_.reset(tick_, scheduler_);
+    }
 
     void setWorkerCount(std::size_t worker_count) {
         worker_count = worker_count == 0 ? 1 : worker_count;
@@ -108,8 +114,12 @@ public:
     }
 
     void addComponent(Component& component) {
+        const auto component_id = components_.size();
+        auto process = component.process();
         components_.push_back(&component);
         profiles_.emplace_back();
+        component.ctx_ = &tick_context_;
+        scheduler_.addProcess(std::move(process), component_id, &tick_context_);
     }
 
     void addObject(TickObject& object) {
@@ -125,19 +135,10 @@ public:
             object->beginTick(tick_);
         }
 
-        TickContext ctx(tick_, scheduler_);
+        tick_context_.reset(tick_, scheduler_);
 
         rebuildComponentOrder();
-        for (const auto component_id : component_order_) {
-            auto* component = components_[component_id];
-            component->ctx_ = &ctx;
-            scheduler_.add(component->tick(), component_id, load_balancing_enabled_, &ctx);
-        }
-
-        scheduler_.run();
-        for (auto* component : components_) {
-            component->clearContext();
-        }
+        scheduler_.run(component_order_, load_balancing_enabled_);
         auto samples = scheduler_.takeSamples();
 
         for (auto* object : objects_) {
@@ -228,6 +229,7 @@ private:
     TickId tick_ = 0;
     std::size_t worker_count_ = 1;
     Scheduler scheduler_;
+    TickContext tick_context_;
     std::vector<Component*> components_;
     std::vector<TickObject*> objects_;
     std::vector<ComponentProfile> profiles_;
@@ -237,3 +239,9 @@ private:
 };
 
 } // namespace coropulse
+
+#define MAKE_PROCESS(...)                                      \
+    ::coropulse::Task<void> process() override {               \
+        for (;; co_yield ::coropulse::tickDone{}) __VA_ARGS__  \
+        co_return;                                             \
+    }

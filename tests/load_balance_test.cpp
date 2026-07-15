@@ -15,7 +15,7 @@ public:
                    std::vector<std::vector<int>>& order)
         : id_(id), work_rounds_(work_rounds), order_(order) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         const auto tick_index = static_cast<std::size_t>(currentTick() - 1);
         if (tick_index < order_.size()) {
             order_[tick_index].push_back(id_);
@@ -28,8 +28,7 @@ public:
             state_ += currentTick() + i;
         }
 
-        co_return;
-    }
+    })
 
     std::uint64_t state() const noexcept {
         return state_;

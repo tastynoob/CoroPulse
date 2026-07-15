@@ -118,7 +118,7 @@ public:
         }
     }
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         const bool wakeup_needed = co_await need_wakeup.read();
 
         std::vector<bool> became_ready_this_tick(program_.size(), false);
@@ -145,13 +145,13 @@ public:
 
         const auto candidate = pickReadyInstruction();
         if (!candidate) {
-            co_return;
+            continue;
         }
 
         const auto& inst = program_[*candidate];
         if (!issue_out.write(IssuedInstruction{inst.id, inst.latency})) {
             ++channel_full_stalls_;
-            co_return;
+            continue;
         }
 
         issued_[inst.id] = true;
@@ -160,9 +160,7 @@ public:
         if (became_ready_this_tick[inst.id]) {
             ++same_tick_wakeup_issues_;
         }
-
-        co_return;
-    }
+    })
 
     bool allIssued() const {
         return issued_count_ == program_.size();
@@ -209,7 +207,7 @@ public:
     explicit ExecuteUnit(std::uint64_t execute_work_rounds)
         : execute_work_rounds_(execute_work_rounds) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         WakeupData wakeup;
 
         const auto active_count = static_cast<std::uint64_t>(executing_.size());
@@ -244,9 +242,7 @@ public:
             });
             ++accepted_count_;
         }
-
-        co_return;
-    }
+    })
 
     bool idle() const { return executing_.empty(); }
     std::size_t acceptedCount() const { return accepted_count_; }

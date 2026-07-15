@@ -14,14 +14,13 @@ struct FanoutProducer final : Component {
     Output<int> out{"out"};
     bool sent = false;
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         if (!sent) {
             const bool ok = out.write(7);
             assert(ok);
             sent = true;
         }
-        co_return;
-    }
+    })
 };
 
 struct AtomicChannelConsumer final : Component {
@@ -34,7 +33,7 @@ struct AtomicChannelConsumer final : Component {
                           std::atomic<int>& value_sum)
         : empty_reads(empty_reads), value_reads(value_reads), value_sum(value_sum) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         auto value = in.read();
         if (value) {
             value_reads.fetch_add(1, std::memory_order_relaxed);
@@ -42,8 +41,7 @@ struct AtomicChannelConsumer final : Component {
         } else {
             empty_reads.fetch_add(1, std::memory_order_relaxed);
         }
-        co_return;
-    }
+    })
 };
 
 template <class OutputT, class InputT>
@@ -93,21 +91,19 @@ struct SignalWaiter final : Component {
 
     SignalWaiter(std::atomic<int>& reads, std::atomic<int>& sum) : reads(reads), sum(sum) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         const int value = co_await signal.read();
         reads.fetch_add(1, std::memory_order_relaxed);
         sum.fetch_add(value, std::memory_order_relaxed);
-        co_return;
-    }
+    })
 };
 
 struct SignalSetter final : Component {
     SignalOutput<int> signal{"signal"};
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         signal.set(11);
-        co_return;
-    }
+    })
 };
 
 void signal_broadcast_wakes_many_waiters_on_many_workers() {
@@ -140,13 +136,12 @@ struct ChainUpstream final : Component {
 
     explicit ChainUpstream(std::atomic<int>& sends) : sends(sends) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         const auto value = co_await ready.read();
         if (value.can_accept) {
             sends.fetch_add(1, std::memory_order_relaxed);
         }
-        co_return;
-    }
+    })
 };
 
 struct ChainMiddle final : Component {
@@ -156,23 +151,21 @@ struct ChainMiddle final : Component {
 
     explicit ChainMiddle(std::atomic<int>& forwards) : forwards(forwards) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         const auto value = co_await sink_ready.read();
         if (value.can_accept) {
             forwards.fetch_add(1, std::memory_order_relaxed);
             upstream_ready.set(Ready{true});
         }
-        co_return;
-    }
+    })
 };
 
 struct ChainSink final : Component {
     SignalOutput<Ready> ready{"ready"};
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         ready.set(Ready{true});
-        co_return;
-    }
+    })
 };
 
 void many_backpressure_chains_progress_concurrently() {

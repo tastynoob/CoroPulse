@@ -18,14 +18,13 @@ class ApiProducer final : public Component {
 public:
     Output<int> out{"out"};
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         if (!sent_) {
             const bool ok = out.write(42);
             assert(ok);
             sent_ = true;
         }
-        co_return;
-    }
+    })
 
 private:
     bool sent_ = false;
@@ -37,10 +36,9 @@ public:
 
     explicit ApiConsumer(std::vector<std::optional<int>>& reads) : reads_(reads) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         reads_.push_back(in.read());
-        co_return;
-    }
+    })
 
 private:
     std::vector<std::optional<int>>& reads_;
@@ -78,13 +76,12 @@ public:
 
     explicit ApiWaitingComponent(std::vector<std::string>& events) : events_(events) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         events_.push_back("wait-before");
         const auto value = co_await ready.read();
         assert(value.can_accept);
         events_.push_back("wait-after");
-        co_return;
-    }
+    })
 
 private:
     std::vector<std::string>& events_;
@@ -96,11 +93,10 @@ public:
 
     explicit ApiSignalSetter(std::vector<std::string>& events) : events_(events) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         events_.push_back("set");
         ready.set(Ready{true});
-        co_return;
-    }
+    })
 
 private:
     std::vector<std::string>& events_;
@@ -142,10 +138,60 @@ void simulator_freezes_topology_after_first_tick() {
     assert(threw);
 }
 
+class PersistentLocalComponent final : public Component {
+public:
+    explicit PersistentLocalComponent(std::vector<int>& values) : values_(values) {}
+
+    Task<void> process() override {
+        int local_counter = 0;
+        for (;;) {
+            values_.push_back(++local_counter);
+            co_yield tickDone{};
+        }
+    }
+
+private:
+    std::vector<int>& values_;
+};
+
+void process_frame_persists_across_ticks() {
+    Simulator sim;
+    std::vector<int> values;
+    sim.createComponent<PersistentLocalComponent>(values);
+
+    sim.run(3);
+
+    const std::vector<int> expected = {1, 2, 3};
+    assert(values == expected);
+}
+
+class ReturningProcess final : public Component {
+public:
+    Task<void> process() override {
+        co_return;
+    }
+};
+
+void process_return_is_reported_as_error() {
+    Simulator sim;
+    sim.createComponent<ReturningProcess>();
+
+    bool threw = false;
+    try {
+        sim.tick();
+    } catch (const std::runtime_error& error) {
+        threw = std::string(error.what()).find("component process returned unexpectedly") !=
+                std::string::npos;
+    }
+    assert(threw);
+}
+
 } // namespace
 
 int main() {
     simulator_connects_channel_ports();
     simulator_connects_signal_ports();
     simulator_freezes_topology_after_first_tick();
+    process_frame_persists_across_ticks();
+    process_return_is_reported_as_error();
 }

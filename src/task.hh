@@ -12,6 +12,8 @@ namespace coropulse {
 class Scheduler;
 class TickContext;
 
+struct tickDone {};
+
 namespace detail {
 
 inline thread_local TickContext* current_tick_context = nullptr;
@@ -56,6 +58,7 @@ public:
         std::size_t component_id = 0;
         bool profile_active_time = false;
         bool deferred_resume = false;
+        bool tick_done = false;
         std::chrono::nanoseconds active_time{0};
 
         Task get_return_object() noexcept {
@@ -64,6 +67,19 @@ public:
 
         std::suspend_always initial_suspend() noexcept { return {}; }
         std::suspend_always final_suspend() noexcept { return {}; }
+        auto yield_value(tickDone) noexcept {
+            struct TickBoundaryAwaiter {
+                bool await_ready() const noexcept { return false; }
+
+                void await_suspend(std::coroutine_handle<promise_type> handle) const noexcept {
+                    handle.promise().tick_done = true;
+                }
+
+                void await_resume() const noexcept {}
+            };
+
+            return TickBoundaryAwaiter{};
+        }
         void return_void() noexcept {}
         void unhandled_exception() noexcept { exception = std::current_exception(); }
     };

@@ -16,14 +16,13 @@ struct OneShotProducer final : Component {
     Output<int> out{"out"};
     bool sent = false;
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         if (!sent) {
             const bool ok = out.write(42);
             assert(ok);
             sent = true;
         }
-        co_return;
-    }
+    })
 };
 
 struct RecordingConsumer final : Component {
@@ -32,10 +31,9 @@ struct RecordingConsumer final : Component {
 
     explicit RecordingConsumer(std::vector<std::optional<int>>& reads) : reads(reads) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         reads.push_back(in.read());
-        co_return;
-    }
+    })
 };
 
 void channel_values_are_visible_next_tick() {
@@ -62,13 +60,12 @@ struct WaitingComponent final : Component {
 
     explicit WaitingComponent(std::vector<std::string>& events) : events(events) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         events.push_back("waiter-before");
         const bool value = co_await ready.read();
         assert(value);
         events.push_back("waiter-after");
-        co_return;
-    }
+    })
 };
 
 struct SetterComponent final : Component {
@@ -77,11 +74,10 @@ struct SetterComponent final : Component {
 
     explicit SetterComponent(std::vector<std::string>& events) : events(events) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         events.push_back("setter");
         ready.set(true);
-        co_return;
-    }
+    })
 };
 
 void pending_signal_wakes_coroutine_in_same_tick() {
@@ -108,13 +104,12 @@ struct UpstreamCell final : Component {
 
     explicit UpstreamCell(std::vector<std::string>& events) : events(events) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         events.push_back("upstream-wait");
         const auto ready = co_await downstream_ready.read();
         assert(ready.can_accept);
         events.push_back("upstream-send");
-        co_return;
-    }
+    })
 };
 
 struct MiddleCell final : Component {
@@ -124,14 +119,13 @@ struct MiddleCell final : Component {
 
     explicit MiddleCell(std::vector<std::string>& events) : events(events) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         events.push_back("middle-wait");
         const auto ready = co_await sink_ready.read();
         assert(ready.can_accept);
         events.push_back("middle-ready");
         upstream_ready.set(Ready{true});
-        co_return;
-    }
+    })
 };
 
 struct SinkCell final : Component {
@@ -140,11 +134,10 @@ struct SinkCell final : Component {
 
     explicit SinkCell(std::vector<std::string>& events) : events(events) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         events.push_back("sink-ready");
         sink_ready.set(Ready{true});
-        co_return;
-    }
+    })
 };
 
 void timely_backpressure_propagates_through_signal_chain() {
@@ -172,18 +165,15 @@ void timely_backpressure_propagates_through_signal_chain() {
 struct DeadlockedComponent final : Component {
     SignalInput<bool> signal{"signal"};
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         (void)co_await signal.read();
-        co_return;
-    }
+    })
 };
 
 struct UnusedSetter final : Component {
     SignalOutput<bool> signal{"signal"};
 
-    Task<void> tick() override {
-        co_return;
-    }
+    MAKE_PROCESS({})
 };
 
 void missing_signal_set_is_reported_as_deadlock() {

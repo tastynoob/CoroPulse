@@ -41,11 +41,10 @@ public:
           work_rounds_(work_rounds),
           state_(0x123456789abcdef0ULL ^ (id * 0x100000001b3ULL)) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         state_ = burnCpu(state_ + currentTick() + id_, work_rounds_);
         checksum_ ^= state_ + (currentTick() << 11) + id_;
-        co_return;
-    }
+    })
 
     std::uint64_t checksum() const {
         return checksum_ ^ state_;

@@ -9,6 +9,7 @@
 #include <exception>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -57,14 +58,15 @@ public:
     Scheduler(const Scheduler&) = delete;
     Scheduler& operator=(const Scheduler&) = delete;
 
-    void add(Task<void> task, std::size_t component_id = 0,
-             bool profile_active_time = false, TickContext* tick_context = nullptr) {
+    void addProcess(Task<void> task, std::size_t component_id = 0,
+                    TickContext* tick_context = nullptr) {
         task.bind(*this);
         auto handle = task.release();
         handle.promise().tick_context = tick_context;
         handle.promise().component_id = component_id;
-        handle.promise().profile_active_time = profile_active_time;
+        handle.promise().profile_active_time = false;
         handle.promise().deferred_resume = false;
+        handle.promise().tick_done = false;
         handle.promise().active_time = Duration{0};
 
         std::lock_guard lock(mutex_);
@@ -76,11 +78,15 @@ public:
             handle.destroy();
             throw std::runtime_error("cannot add task while scheduler is running");
         }
-        if (live_ == 0 && ready_.empty()) {
+        if (live_ == 0 && ready_.empty() && next_tick_count_ == 0) {
             owned_.clear();
         }
         owned_.push_back(handle);
-        ready_.push_back(handle);
+        if (component_id >= next_tick_.size()) {
+            next_tick_.resize(component_id + 1);
+        }
+        next_tick_[component_id] = handle;
+        ++next_tick_count_;
         ++live_;
     }
 
@@ -107,7 +113,8 @@ public:
         handle.promise().deferred_resume = true;
     }
 
-    void run() {
+    void run(const std::vector<std::size_t>& component_order,
+             bool profile_active_time) {
         std::unique_lock lock(mutex_);
         if (failed_) {
             throw std::runtime_error("cannot reuse scheduler after failed tick");
@@ -116,6 +123,7 @@ public:
             throw std::runtime_error("scheduler is already running");
         }
 
+        startTickLocked(component_order, profile_active_time);
         dispatching_ = true;
         work_cv_.notify_all();
 
@@ -131,7 +139,7 @@ public:
                 std::rethrow_exception(exception);
             }
 
-            if (live_ == 0 && active_ == 0 && ready_.empty()) {
+            if (active_ == 0 && ready_.empty() && live_ == next_tick_count_) {
                 dispatching_ = false;
                 work_cv_.notify_all();
                 return;
@@ -141,7 +149,7 @@ public:
                 failed_ = true;
                 dispatching_ = false;
                 first_exception_ = std::make_exception_ptr(std::runtime_error(
-                    "deadlock: PEQ drained while coroutine(s) are still waiting"));
+                    "deadlock: current tick drained while coroutine(s) are still waiting"));
                 auto exception = first_exception_;
                 lock.unlock();
                 std::rethrow_exception(exception);
@@ -169,6 +177,36 @@ public:
 
 private:
     using Clock = std::chrono::steady_clock;
+
+    void startTickLocked(const std::vector<std::size_t>& component_order,
+                         bool profile_active_time) {
+        if (!ready_.empty()) {
+            throw std::runtime_error("scheduler ready queue is not empty at tick start");
+        }
+
+        samples_.clear();
+        for (const auto component_id : component_order) {
+            if (component_id >= next_tick_.size()) {
+                continue;
+            }
+
+            auto handle = next_tick_[component_id];
+            if (!handle) {
+                continue;
+            }
+
+            next_tick_[component_id] = {};
+            --next_tick_count_;
+            ready_.push_back(handle);
+        }
+
+        for (auto handle : ready_) {
+            handle.promise().profile_active_time = profile_active_time;
+            handle.promise().deferred_resume = false;
+            handle.promise().tick_done = false;
+            handle.promise().active_time = Duration{0};
+        }
+    }
 
     void workerLoop() noexcept {
         for (;;) {
@@ -222,9 +260,17 @@ private:
         const bool done = !resume_exception && handle.done();
         const bool should_defer = !resume_exception && !done &&
                                   handle.promise().deferred_resume;
+        const bool tick_done = !resume_exception && !done &&
+                               handle.promise().tick_done;
         handle.promise().deferred_resume = false;
+        handle.promise().tick_done = false;
         if (done) {
             coroutine_exception = handle.promise().exception;
+            if (!coroutine_exception) {
+                coroutine_exception = std::make_exception_ptr(std::runtime_error(
+                    "component process returned unexpectedly: component_id=" +
+                    std::to_string(handle.promise().component_id)));
+            }
             if (handle.promise().profile_active_time) {
                 sample = TaskSample{
                     handle.promise().component_id,
@@ -245,6 +291,21 @@ private:
                 handle.destroy();
                 forgetLocked(handle);
                 --live_;
+            } else if (tick_done && !stopping_ && dispatching_ && !first_exception_) {
+                if (handle.promise().profile_active_time) {
+                    samples_.push_back(TaskSample{
+                        handle.promise().component_id,
+                        handle.promise().active_time,
+                    });
+                }
+                const auto component_id = handle.promise().component_id;
+                if (component_id >= next_tick_.size()) {
+                    next_tick_.resize(component_id + 1);
+                }
+                if (!next_tick_[component_id]) {
+                    ++next_tick_count_;
+                }
+                next_tick_[component_id] = handle;
             } else if (should_defer && !stopping_ && dispatching_ && !first_exception_) {
                 ready_.push_back(handle);
             }
@@ -275,10 +336,12 @@ private:
     std::condition_variable work_cv_;
     std::condition_variable done_cv_;
     std::deque<Handle> ready_;
+    std::vector<Handle> next_tick_;
     std::vector<Handle> owned_;
     std::vector<TaskSample> samples_;
     std::size_t live_ = 0;
     std::size_t active_ = 0;
+    std::size_t next_tick_count_ = 0;
     bool dispatching_ = false;
     bool stopping_ = false;
     bool failed_ = false;

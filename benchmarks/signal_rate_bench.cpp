@@ -74,7 +74,7 @@ public:
           has_output_(has_output),
           state_(0x6a09e667f3bcc909ULL ^ (stage_id * 0x100000001b3ULL)) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         bool local_accept = true;
         if (has_upstream_ready_) {
             local_accept = coinFlip(currentTick(), stage_id_);
@@ -129,8 +129,7 @@ public:
             upstream_ready.set(Ready{local_accept});
         }
 
-        co_return;
-    }
+    })
 
     std::uint64_t checksum() const {
         return checksum_ ^ state_ ^ (ready_true_ << 8) ^ (ready_false_ << 24) ^

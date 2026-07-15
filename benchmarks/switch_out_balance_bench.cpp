@@ -71,20 +71,19 @@ private:
     std::vector<std::atomic<std::int64_t>> light_done_ns_;
 };
 
-class HeavyNoYield final : public Component {
+class HeavyNoSwitchOut final : public Component {
 public:
-    HeavyNoYield(std::uint64_t rounds, std::uint64_t chunks)
+    HeavyNoSwitchOut(std::uint64_t rounds, std::uint64_t chunks)
         : rounds_(rounds),
           chunks_(chunks),
           state_(0x6a09e667f3bcc909ULL) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         for (std::uint64_t i = 0; i < chunks_; ++i) {
             state_ = burnCpu(state_ + currentTick() + i, rounds_);
         }
         checksum_ ^= state_ + (currentTick() << 7);
-        co_return;
-    }
+    })
 
     std::uint64_t checksum() const {
         return checksum_ ^ state_;
@@ -97,23 +96,22 @@ private:
     std::uint64_t checksum_ = 0;
 };
 
-class HeavyYielding final : public Component {
+class HeavySwitchingOut final : public Component {
 public:
-    HeavyYielding(std::uint64_t rounds, std::uint64_t chunks)
+    HeavySwitchingOut(std::uint64_t rounds, std::uint64_t chunks)
         : rounds_(rounds),
           chunks_(chunks),
           state_(0x6a09e667f3bcc909ULL) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         for (std::uint64_t i = 0; i < chunks_; ++i) {
             state_ = burnCpu(state_ + currentTick() + i, rounds_);
             if (i + 1 != chunks_) {
-                co_await yield();
+                co_await switchOut();
             }
         }
         checksum_ ^= state_ + (currentTick() << 7);
-        co_return;
-    }
+    })
 
     std::uint64_t checksum() const {
         return checksum_ ^ state_;
@@ -134,12 +132,11 @@ public:
           probe_(probe),
           state_(0xbb67ae8584caa73bULL ^ index) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         state_ = burnCpu(state_ + currentTick() + index_, rounds_);
         checksum_ ^= state_ + (currentTick() << 11) + index_;
         probe_.recordLight(index_);
-        co_return;
-    }
+    })
 
     std::uint64_t checksum() const {
         return checksum_ ^ state_;
@@ -165,7 +162,7 @@ struct BenchConfig {
 };
 
 struct BenchResult {
-    bool yielding = false;
+    bool switching_out = false;
     bool load_balancing = false;
     bool heavy_first = true;
     std::size_t workers = 1;
@@ -176,7 +173,7 @@ struct BenchResult {
 };
 
 template <class HeavyT>
-BenchResult runCase(const BenchConfig& config, std::size_t workers, bool yielding,
+BenchResult runCase(const BenchConfig& config, std::size_t workers, bool switching_out,
                     bool load_balancing, bool heavy_first) {
     Simulator sim(load_balancing
                       ? SimulatorConfig{workers, static_cast<std::size_t>(
@@ -223,7 +220,7 @@ BenchResult runCase(const BenchConfig& config, std::size_t workers, bool yieldin
 
     const auto seconds = std::chrono::duration<double>(end - start).count();
     return BenchResult{
-        yielding,
+        switching_out,
         load_balancing,
         heavy_first,
         workers,
@@ -234,21 +231,21 @@ BenchResult runCase(const BenchConfig& config, std::size_t workers, bool yieldin
     };
 }
 
-BenchResult bestOf(const BenchConfig& config, std::size_t workers, bool yielding,
+BenchResult bestOf(const BenchConfig& config, std::size_t workers, bool switching_out,
                    bool load_balancing, bool heavy_first) {
     BenchResult best{};
-    best.yielding = yielding;
+    best.switching_out = switching_out;
     best.load_balancing = load_balancing;
     best.heavy_first = heavy_first;
     best.workers = workers;
 
     for (std::uint64_t repeat = 0; repeat < config.repeats; ++repeat) {
-        const auto result = yielding
-                                ? runCase<HeavyYielding>(
-                                      config, workers, yielding, load_balancing,
+        const auto result = switching_out
+                                ? runCase<HeavySwitchingOut>(
+                                      config, workers, switching_out, load_balancing,
                                       heavy_first)
-                                : runCase<HeavyNoYield>(
-                                      config, workers, yielding, load_balancing,
+                                : runCase<HeavyNoSwitchOut>(
+                                      config, workers, switching_out, load_balancing,
                                       heavy_first);
         if (repeat == 0 || result.seconds < best.seconds) {
             best = result;
@@ -276,10 +273,10 @@ void printResult(std::string_view name, const BenchResult& result,
 
 void runScenario(const BenchConfig& config, bool heavy_first) {
     const auto baseline = bestOf(config, 1, false, false, heavy_first);
-    const auto no_yield = bestOf(config, 2, false, false, heavy_first);
-    const auto no_yield_lb = bestOf(config, 2, false, true, heavy_first);
-    const auto yielding = bestOf(config, 2, true, false, heavy_first);
-    const auto yielding_lb = bestOf(config, 2, true, true, heavy_first);
+    const auto no_switch_out = bestOf(config, 2, false, false, heavy_first);
+    const auto no_switch_out_lb = bestOf(config, 2, false, true, heavy_first);
+    const auto switching_out = bestOf(config, 2, true, false, heavy_first);
+    const auto switching_out_lb = bestOf(config, 2, true, true, heavy_first);
 
     std::cout << '\n'
               << (heavy_first ? "heavy-first registration" : "heavy-last registration")
@@ -292,21 +289,21 @@ void runScenario(const BenchConfig& config, bool heavy_first) {
               << std::setw(14) << "speedup"
               << std::setw(18) << "light_tail_ms"
               << "    checksum\n";
-    printResult("no-yield", baseline, baseline);
-    printResult("no-yield", no_yield, baseline);
-    printResult("no-yield", no_yield_lb, baseline);
-    printResult("yield", yielding, baseline);
-    printResult("yield", yielding_lb, baseline);
+    printResult("no-switch-out", baseline, baseline);
+    printResult("no-switch-out", no_switch_out, baseline);
+    printResult("no-switch-out", no_switch_out_lb, baseline);
+    printResult("switch-out", switching_out, baseline);
+    printResult("switch-out", switching_out_lb, baseline);
 
-    std::cout << "lb_over_plain_no_yield="
+    std::cout << "lb_over_plain_no_switch_out="
               << std::fixed << std::setprecision(3)
-              << (no_yield.seconds / no_yield_lb.seconds) << "x\n";
-    std::cout << "yield_lb_over_plain_no_yield="
+              << (no_switch_out.seconds / no_switch_out_lb.seconds) << "x\n";
+    std::cout << "switch_out_lb_over_plain_no_switch_out="
               << std::fixed << std::setprecision(3)
-              << (no_yield.seconds / yielding_lb.seconds) << "x\n";
-    std::cout << "yield_lb_light_tail_reduction="
+              << (no_switch_out.seconds / switching_out_lb.seconds) << "x\n";
+    std::cout << "switch_out_lb_light_tail_reduction="
               << std::fixed << std::setprecision(3)
-              << (no_yield.mean_light_tail_ms / yielding_lb.mean_light_tail_ms)
+              << (no_switch_out.mean_light_tail_ms / switching_out_lb.mean_light_tail_ms)
               << "x\n";
 }
 
@@ -321,11 +318,11 @@ int main(int argc, char** argv) {
     config.heavy_chunks = parseArg(argv, argc, 5, config.heavy_chunks);
     config.repeats = parseArg(argv, argc, 6, config.repeats);
 
-    std::cout << "2-worker cooperative yield fairness benchmark\n";
+    std::cout << "2-worker cooperative switchOut fairness benchmark\n";
     std::cout << "one heavy component A is compared against a light-task backlog\n";
     std::cout << "A is heavier than any single light component, but the light backlog is "
                  "larger than A\n";
-    std::cout << "yield is expected to improve light-task tail latency, not to parallelize A\n";
+    std::cout << "switchOut is expected to improve light-task tail latency, not to parallelize A\n";
     std::cout << "ticks=" << config.ticks
               << ", warmup_ticks=" << config.warmup_ticks
               << ", light_components=" << config.light_components
@@ -334,7 +331,7 @@ int main(int argc, char** argv) {
               << ", heavy_rounds_per_chunk=" << config.heavy_rounds_per_chunk
               << ", load_balance_window=" << config.load_balance_window
               << ", repeats=" << config.repeats << '\n';
-    std::cout << "usage: ./yield_balance_bench [ticks] [light_components] "
+    std::cout << "usage: ./switch_out_balance_bench [ticks] [light_components] "
                  "[light_rounds] [heavy_rounds_per_chunk] [heavy_chunks] [repeats]\n";
 
     runScenario(config, true);

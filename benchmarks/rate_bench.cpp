@@ -47,7 +47,7 @@ public:
           has_output_(has_output),
           state_(0x123456789abcdef0ULL ^ (stage_id * 0x100000001b3ULL)) {}
 
-    Task<void> tick() override {
+    MAKE_PROCESS({
         if (has_input_) {
             auto value = in.read();
             if (value) {
@@ -72,8 +72,7 @@ public:
             pending_output_.reset();
         }
 
-        co_return;
-    }
+    })
 
     std::uint64_t checksum() const {
         return checksum_ ^ state_ ^ (accepted_ << 32) ^ produced_;
