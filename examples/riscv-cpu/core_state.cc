@@ -120,6 +120,7 @@ void CoreState::markCompleted(const ExecResult& result) {
         throw std::runtime_error("completion dyninst does not match rob entry");
     }
     entry.inst->executeState().value = result.value;
+    entry.inst->executeState().store = result.store;
     entry.inst->commitState().completed = true;
 }
 
@@ -136,6 +137,20 @@ RetireResult CoreState::retire(std::size_t max_count) {
         const auto& inst = entry.inst->staticInst();
         const auto& rename = entry.inst->renameState();
         const auto& execute = entry.inst->executeState();
+        result.trace.push_back(RetiredInstTrace{
+            rename.sequence,
+            entry.inst->pc(),
+            inst.bits,
+            inst.opcode,
+            rename.writes_rd,
+            inst.rd,
+            execute.value,
+            execute.store,
+            execute.redirect,
+        });
+        if (execute.store) {
+            result.stores.push_back(*execute.store);
+        }
         if (rename.writes_rd) {
             auto& reg = registers_[static_cast<std::size_t>(inst.rd)];
             free_phys_regs_.push_back(reg.committed_phys);

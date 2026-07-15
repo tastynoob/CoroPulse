@@ -35,3 +35,6 @@ Thumbs.db
 
 # Generated compile database
 compile_commands.json
+
+coremark/
+coremark-port/

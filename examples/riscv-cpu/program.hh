@@ -12,6 +12,7 @@ namespace riscv_cpu {
 
 std::vector<StaticInst> buildProgram();
 std::vector<StaticInst> buildSyntheticProgram(std::size_t instruction_count);
+std::vector<std::uint8_t> loadRawImage(const std::string& path);
 std::vector<StaticInst> loadRawProgram(const std::string& path);
 std::uint64_t syntheticRegisterValue(std::size_t instruction_count, int reg);
 void printProgram(const std::vector<StaticInst>& program, std::ostream& os,

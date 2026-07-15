@@ -79,6 +79,8 @@ void ExecuteStage::completeReadyUop() {
 }
 
 ExecResult ExecuteStage::execute(DynInstPtr inst) {
+    sram_.setTimerValue(currentTick());
+
     const auto& static_inst = inst->staticInst();
     const auto& rename = inst->renameState();
     const auto src1 = rename.src1.value;
@@ -163,16 +165,16 @@ ExecResult ExecuteStage::execute(DynInstPtr inst) {
         result.value = sram_.load(addSignedImmediate(src1, static_inst.imm), 4, false);
         break;
     case Opcode::sb:
-        sram_.store(addSignedImmediate(src1, static_inst.imm), src2, 1);
+        result.store = StoreWrite{addSignedImmediate(src1, static_inst.imm), src2, 1};
         break;
     case Opcode::sh:
-        sram_.store(addSignedImmediate(src1, static_inst.imm), src2, 2);
+        result.store = StoreWrite{addSignedImmediate(src1, static_inst.imm), src2, 2};
         break;
     case Opcode::sw:
-        sram_.store(addSignedImmediate(src1, static_inst.imm), src2, 4);
+        result.store = StoreWrite{addSignedImmediate(src1, static_inst.imm), src2, 4};
         break;
     case Opcode::sd:
-        sram_.store(addSignedImmediate(src1, static_inst.imm), src2, 8);
+        result.store = StoreWrite{addSignedImmediate(src1, static_inst.imm), src2, 8};
         break;
     case Opcode::addi:
         result.value = addSignedImmediate(src1, static_inst.imm);

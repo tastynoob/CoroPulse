@@ -9,7 +9,29 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <string>
+#include <vector>
+
+namespace {
+
+std::size_t parseTraceLimit(const std::string& arg) {
+    const auto prefix = std::string{"--trace-limit="};
+    if (arg.rfind(prefix, 0) != 0) {
+        throw std::runtime_error("invalid trace limit option: " + arg);
+    }
+    return static_cast<std::size_t>(std::stoull(arg.substr(prefix.size())));
+}
+
+coropulse::TickId parseMaxTicks(const std::string& arg) {
+    const auto prefix = std::string{"--max-ticks="};
+    if (arg.rfind(prefix, 0) != 0) {
+        throw std::runtime_error("invalid max ticks option: " + arg);
+    }
+    return static_cast<coropulse::TickId>(std::stoull(arg.substr(prefix.size())));
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     const coropulse::Params params = {
@@ -23,7 +45,7 @@ int main(int argc, char** argv) {
             {"commit_width", 1},
         }},
         {"memory", {
-            {"data_bytes", 4096},
+            {"data_bytes", 16 * 1024 * 1024},
             {"initial_word0", 10},
         }},
         {"program", {
@@ -32,25 +54,63 @@ int main(int argc, char** argv) {
         }},
     };
 
-    const auto raw_path = argc > 1 ? std::string(argv[1]) : std::string{};
+    std::string raw_path;
+    bool trace = false;
+    std::size_t trace_limit = 0;
+    coropulse::TickId max_ticks_override = 0;
+    for (int i = 1; i < argc; ++i) {
+        const auto arg = std::string(argv[i]);
+        if (arg == "--trace") {
+            trace = true;
+        } else if (arg.rfind("--trace-limit=", 0) == 0) {
+            trace = true;
+            trace_limit = parseTraceLimit(arg);
+        } else if (arg.rfind("--max-ticks=", 0) == 0) {
+            max_ticks_override = parseMaxTicks(arg);
+        } else if (raw_path.empty()) {
+            raw_path = arg;
+        } else {
+            throw std::runtime_error("unexpected argument: " + arg);
+        }
+    }
     const bool raw_program = !raw_path.empty();
     const auto synthetic_instructions =
         params["program"]["synthetic_instructions"].as<std::size_t>();
     const bool synthetic = !raw_program && synthetic_instructions != 0;
 
-    auto program = raw_program ? riscv_cpu::loadRawProgram(raw_path)
-                               : (synthetic
-                                      ? riscv_cpu::buildSyntheticProgram(synthetic_instructions)
-                                      : riscv_cpu::buildProgram());
+    std::vector<std::uint8_t> raw_image;
+    std::vector<riscv_cpu::StaticInst> program;
+    if (raw_program) {
+        raw_image = riscv_cpu::loadRawImage(raw_path);
+    } else {
+        program = synthetic ? riscv_cpu::buildSyntheticProgram(synthetic_instructions)
+                            : riscv_cpu::buildProgram();
+    }
+    const auto instruction_count =
+        raw_program ? raw_image.size() / 4 : program.size();
 
-    const auto configured_max_ticks = params["sim"]["max_ticks"].as<coropulse::TickId>();
+    const auto configured_max_ticks =
+        max_ticks_override != 0 ? max_ticks_override
+                                : params["sim"]["max_ticks"].as<coropulse::TickId>();
     const auto tick_limit =
         configured_max_ticks != 0
             ? configured_max_ticks
-            : static_cast<coropulse::TickId>(program.size() * 12 + 1000);
+            : (raw_program
+                   ? static_cast<coropulse::TickId>(100000000)
+                   : static_cast<coropulse::TickId>(instruction_count * 12 + 1000));
 
-    riscv_cpu::SimpleSram sram(program, params["memory"]["data_bytes"].as<std::size_t>());
-    sram.store64(0, params["memory"]["initial_word0"].as<std::uint64_t>());
+    auto make_sram = [&]() {
+        if (raw_program) {
+            return riscv_cpu::SimpleSram(
+                raw_image, params["memory"]["data_bytes"].as<std::size_t>());
+        }
+        return riscv_cpu::SimpleSram(
+            program, params["memory"]["data_bytes"].as<std::size_t>());
+    };
+    auto sram = make_sram();
+    if (!raw_program) {
+        sram.store64(0, params["memory"]["initial_word0"].as<std::uint64_t>());
+    }
 
     riscv_cpu::CoreState core(params["core"]["physical_registers"].as<std::size_t>());
     riscv_cpu::DynInstPool inst_pool;
@@ -63,7 +123,8 @@ int main(int argc, char** argv) {
         params["core"]["issue_capacity"].as<std::size_t>());
     auto& execute = sim.createComponent<riscv_cpu::ExecuteStage>(sram);
     auto& commit = sim.createComponent<riscv_cpu::CommitStage>(
-        core, params["core"]["commit_width"].as<std::size_t>());
+        core, sram, params["core"]["commit_width"].as<std::size_t>(),
+        trace ? &std::cerr : nullptr, trace_limit);
 
     sim.connect(fetch.out, decode.in);
     sim.connect(decode.out, rename.in);
@@ -93,7 +154,7 @@ int main(int argc, char** argv) {
     std::cout << "simple cpu microarchitecture example\n";
     std::cout << "source=" << (raw_program ? raw_path : (synthetic ? "synthetic" : "builtin"))
               << ", workers=" << params["sim"]["workers"].as<std::size_t>()
-              << ", instructions=" << program.size()
+              << ", instructions=" << instruction_count
               << ", physical_registers=" << core.physicalRegisterCount()
               << ", issue_capacity=" << params["core"]["issue_capacity"].as<std::size_t>()
               << ", ticks=" << (ticks + 1)
@@ -129,8 +190,12 @@ int main(int argc, char** argv) {
               << ", x7=" << core.registerValue(7)
               << ", x10=" << core.registerValue(10)
               << ", mem[8]=" << sram.load64(8) << '\n';
-    riscv_cpu::printProgram(program, std::cout,
-                            params["program"]["print_limit"].as<std::size_t>());
+    if (raw_program) {
+        std::cout << "program: raw image, lazy decoded by fetch\n";
+    } else {
+        riscv_cpu::printProgram(program, std::cout,
+                                params["program"]["print_limit"].as<std::size_t>());
+    }
 
     if (!completed) {
         std::cerr << "cpu example did not drain before max_ticks="
@@ -142,7 +207,7 @@ int main(int argc, char** argv) {
     if (synthetic) {
         for (int reg = 1; reg < 32; ++reg) {
             if (core.registerValue(reg) !=
-                riscv_cpu::syntheticRegisterValue(program.size(), reg)) {
+                riscv_cpu::syntheticRegisterValue(instruction_count, reg)) {
                 valid_state = false;
                 break;
             }

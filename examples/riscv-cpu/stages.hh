@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <optional>
 #include <vector>
 
@@ -158,15 +159,22 @@ public:
     coropulse::Input<ExecResult> completion_in{"execute_to_commit"};
     coropulse::Output<ControlRedirect> redirect_out{"commit_redirect"};
 
-    CommitStage(CoreState& core, std::size_t commit_width);
+    CommitStage(CoreState& core, SimpleSram& sram, std::size_t commit_width,
+                std::ostream* trace_out = nullptr, std::size_t trace_limit = 0);
     coropulse::Task<void> process() override;
 
     std::size_t retiredCount() const;
     std::size_t redirectCount() const;
 
 private:
+    void traceRetired(const RetiredInstTrace& inst);
+
     CoreState& core_;
+    SimpleSram& sram_;
     std::size_t commit_width_;
+    std::ostream* trace_out_ = nullptr;
+    std::size_t trace_limit_ = 0;
+    std::size_t trace_count_ = 0;
     std::optional<ControlRedirect> pending_redirect_;
     std::size_t retired_ = 0;
     std::size_t redirects_ = 0;
