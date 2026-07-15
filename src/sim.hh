@@ -1,6 +1,7 @@
 #pragma once
 
 #include "channel.hh"
+#include "params.hh"
 #include "signal.hh"
 
 #include <cstddef>
