@@ -152,6 +152,10 @@ public:
         return runtime_.workerIdleRatio();
     }
 
+    Scheduler::ProfilingStats profilingStats() const {
+        return runtime_.profilingStats();
+    }
+
 private:
     void ensureMutableTopology() const {
         if (topology_frozen_) {

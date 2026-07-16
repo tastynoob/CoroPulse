@@ -159,9 +159,7 @@ private:
             wait_waiters_.clear();
         }
 
-        for (auto waiter : waiters) {
-            ctx.scheduler().schedule(waiter);
-        }
+        ctx.scheduler().scheduleMany(std::move(waiters));
     }
 
     bool awaitReady(std::size_t reader_id, TickContext& ctx) {

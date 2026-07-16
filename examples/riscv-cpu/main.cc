@@ -62,6 +62,7 @@ int main(int argc, char** argv) {
 
     std::string raw_path;
     bool trace = false;
+    bool load_balance = true;
     std::size_t trace_limit = 0;
     std::size_t workers_override = 0;
     coropulse::TickId max_ticks_override = 0;
@@ -76,6 +77,8 @@ int main(int argc, char** argv) {
         const auto arg = std::string(argv[i]);
         if (arg == "--trace") {
             trace = true;
+        } else if (arg == "--no-load-balance") {
+            load_balance = false;
         } else if (arg.rfind("--trace-limit=", 0) == 0) {
             trace = true;
             trace_limit = parseTraceLimit(arg);
@@ -179,7 +182,9 @@ int main(int argc, char** argv) {
     sim.connect(issue.can_accept, rename.issue_can_accept);
     sim.connect(rename.can_accept, decode.rename_can_accept);
 
-    sim.enableLoadBalancing(5);
+    if (load_balance) {
+        sim.enableLoadBalancing(5);
+    }
 
     coropulse::TickId ticks = 0;
     bool completed = false;
@@ -194,6 +199,22 @@ int main(int argc, char** argv) {
     }
     const auto end = std::chrono::steady_clock::now();
     const std::chrono::duration<double> elapsed = end - start;
+    const auto profiling = sim.profilingStats();
+    const auto scheduler_elapsed_ms =
+        std::chrono::duration<double, std::milli>(profiling.elapsed_time).count();
+    const auto worker_capacity_ms =
+        std::chrono::duration<double, std::milli>(profiling.worker_capacity_time).count();
+    const auto worker_idle_ms =
+        std::chrono::duration<double, std::milli>(profiling.worker_idle_time).count();
+    const auto task_active_ms =
+        std::chrono::duration<double, std::milli>(profiling.task_active_time).count();
+    const auto accounted = profiling.worker_idle_time + profiling.task_active_time;
+    const auto unattributed =
+        profiling.worker_capacity_time > accounted
+            ? profiling.worker_capacity_time - accounted
+            : coropulse::Scheduler::Duration{0};
+    const auto unattributed_ms =
+        std::chrono::duration<double, std::milli>(unattributed).count();
 
     std::cout << "simple cpu microarchitecture example\n";
     std::cout << "source=" << raw_path
@@ -207,6 +228,7 @@ int main(int argc, char** argv) {
               << ", rename_width=" << rename_width
               << ", issue_width=" << issue_width
               << ", commit_width=" << commit_width
+              << ", load_balance=" << (load_balance ? "on" : "off")
               << ", ticks=" << (ticks + 1)
               << ", fetched=" << fetch.fetchedCount()
               << ", committed=" << core.committedCount()
@@ -242,6 +264,19 @@ int main(int argc, char** argv) {
               << ", x7=" << core.registerValue(7)
               << ", x10=" << core.registerValue(10)
               << ", mem[8]=" << sram.load64(8) << '\n';
+    std::cout << "scheduler_elapsed_ms=" << scheduler_elapsed_ms
+              << ", worker_capacity_ms=" << worker_capacity_ms
+              << ", task_active_ms=" << task_active_ms
+              << ", task_active=" << (profiling.taskActiveRatio() * 100.0) << "%"
+              << ", worker_idle_ms=" << worker_idle_ms
+              << ", worker_idle=" << (profiling.idleRatio() * 100.0) << "%"
+              << ", scheduler_unattributed_ms=" << unattributed_ms
+              << ", scheduler_unattributed="
+              << (profiling.unattributedRatio() * 100.0) << "%\n";
+    std::cout << "scheduler_resumes=" << profiling.resume_count
+              << ", scheduler_tick_done=" << profiling.tick_done_count
+              << ", scheduler_deferred_resumes=" << profiling.deferred_resume_count
+              << ", scheduler_sleep=" << profiling.sleep_count << '\n';
     std::cout << "program: raw image, lazy decoded by fetch\n";
 
     if (!completed) {

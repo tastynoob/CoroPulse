@@ -30,8 +30,13 @@ public:
         Duration elapsed_time{0};
         Duration worker_idle_time{0};
         Duration worker_capacity_time{0};
+        Duration task_active_time{0};
         std::size_t worker_count = 0;
         std::size_t tick_count = 0;
+        std::size_t resume_count = 0;
+        std::size_t tick_done_count = 0;
+        std::size_t deferred_resume_count = 0;
+        std::size_t sleep_count = 0;
 
         double idleRatio() const noexcept {
             const auto total_time = static_cast<double>(worker_capacity_time.count());
@@ -50,21 +55,58 @@ public:
             return ratio;
         }
 
+        double taskActiveRatio() const noexcept {
+            const auto total_time = static_cast<double>(worker_capacity_time.count());
+            if (total_time <= 0.0) {
+                return 0.0;
+            }
+
+            const auto ratio =
+                static_cast<double>(task_active_time.count()) / total_time;
+            if (ratio < 0.0) {
+                return 0.0;
+            }
+            if (ratio > 1.0) {
+                return 1.0;
+            }
+            return ratio;
+        }
+
+        double unattributedRatio() const noexcept {
+            const auto total_time = static_cast<double>(worker_capacity_time.count());
+            if (total_time <= 0.0) {
+                return 0.0;
+            }
+
+            const auto accounted = worker_idle_time + task_active_time;
+            const auto overhead = worker_capacity_time > accounted
+                                      ? worker_capacity_time - accounted
+                                      : Duration{0};
+            return static_cast<double>(overhead.count()) / total_time;
+        }
+
         void accumulate(const ProfilingStats& stats) noexcept {
             elapsed_time += stats.elapsed_time;
             worker_idle_time += stats.worker_idle_time;
             worker_capacity_time += stats.worker_capacity_time;
+            task_active_time += stats.task_active_time;
             tick_count += stats.tick_count;
+            resume_count += stats.resume_count;
+            tick_done_count += stats.tick_done_count;
+            deferred_resume_count += stats.deferred_resume_count;
+            sleep_count += stats.sleep_count;
             worker_count = stats.worker_count;
         }
     };
 
     explicit Scheduler(std::size_t worker_count = 1)
         : worker_count_(worker_count == 0 ? 1 : worker_count) {
-        workers_.reserve(worker_count_);
         worker_idle_since_.resize(worker_count_);
-        for (std::size_t i = 0; i < worker_count_; ++i) {
-            workers_.emplace_back([this, i] { workerLoop(i); });
+        if (worker_count_ > 1) {
+            workers_.reserve(worker_count_ - 1);
+            for (std::size_t i = 1; i < worker_count_; ++i) {
+                workers_.emplace_back([this, i] { workerLoop(i); });
+            }
         }
     }
 
@@ -132,24 +174,52 @@ public:
             throw std::runtime_error("cannot schedule an empty coroutine handle");
         }
 
+        if (tryScheduleLocal(handle)) {
+            return;
+        }
+
+        bool notify_coordinator = false;
+        bool notify_worker = false;
         {
             std::lock_guard lock(mutex_);
-            if (stopping_ || !dispatching_ || first_exception_) {
-                return;
-            }
-            if (handle.promise().persistent_wait) {
-                handle.promise().persistent_wait = false;
-                if (handle.promise().persistent_wait_counted) {
-                    handle.promise().persistent_wait_counted = false;
-                    --sleeping_count_;
-                }
-            }
-            if (handle.promise().dispatch_epoch != dispatch_epoch_) {
-                prepareForCurrentTickLocked(handle);
-            }
-            ready_.push_back(handle);
+            notify_worker = scheduleLocked(handle);
+            notify_coordinator = notify_worker;
         }
-        work_cv_.notify_one();
+        if (notify_worker) {
+            work_cv_.notify_one();
+        }
+        if (notify_coordinator) {
+            done_cv_.notify_one();
+        }
+    }
+
+    void scheduleMany(std::vector<Handle> handles) {
+        if (handles.empty()) {
+            return;
+        }
+
+        if (tryScheduleLocal(handles)) {
+            return;
+        }
+
+        bool notify_coordinator = false;
+        bool notify_worker = false;
+        {
+            std::lock_guard lock(mutex_);
+            for (auto handle : handles) {
+                if (!handle) {
+                    throw std::runtime_error("cannot schedule an empty coroutine handle");
+                }
+                notify_worker = scheduleLocked(handle) || notify_worker;
+            }
+            notify_coordinator = notify_worker;
+        }
+        if (notify_worker) {
+            work_cv_.notify_all();
+        }
+        if (notify_coordinator) {
+            done_cv_.notify_one();
+        }
     }
 
     void defer(Handle handle) {
@@ -171,7 +241,7 @@ public:
     }
 
     void run(const std::vector<std::size_t>& component_order,
-             bool profile_active_time) {
+             bool profile_active_time, std::size_t active_time_weight = 1) {
         std::unique_lock lock(mutex_);
         if (failed_) {
             throw std::runtime_error("cannot reuse scheduler after failed tick");
@@ -181,46 +251,10 @@ public:
         }
 
         startTickLocked(component_order, profile_active_time);
-        startTickStatsLocked();
+        startTickStatsLocked(active_time_weight);
         dispatching_ = true;
         work_cv_.notify_all();
-
-        while (true) {
-            if (first_exception_) {
-                failed_ = true;
-                finishTickStatsLocked(Clock::now());
-                dispatching_ = false;
-                work_cv_.notify_all();
-                done_cv_.wait(lock, [this] { return active_ == 0; });
-
-                auto exception = first_exception_;
-                lock.unlock();
-                std::rethrow_exception(exception);
-            }
-
-            if (active_ == 0 && ready_.empty() &&
-                live_ == next_tick_count_ + sleeping_count_) {
-                finishTickStatsLocked(Clock::now());
-                dispatching_ = false;
-                work_cv_.notify_all();
-                return;
-            }
-
-            if (ready_.empty() && active_ == 0) {
-                failed_ = true;
-                finishTickStatsLocked(Clock::now());
-                dispatching_ = false;
-                first_exception_ = std::make_exception_ptr(std::runtime_error(
-                    "deadlock: current tick drained while coroutine(s) are still waiting"));
-                auto exception = first_exception_;
-                lock.unlock();
-                std::rethrow_exception(exception);
-            }
-
-            done_cv_.wait(lock, [this] {
-                return first_exception_ || (ready_.empty() && active_ == 0);
-            });
-        }
+        runCoordinatorLocked(lock);
     }
 
     std::size_t live() const {
@@ -233,6 +267,11 @@ public:
     double workerIdleRatio() const {
         std::lock_guard lock(mutex_);
         return profiling_stats_.idleRatio();
+    }
+
+    ProfilingStats profilingStats() const {
+        std::lock_guard lock(mutex_);
+        return profiling_stats_;
     }
 
     std::vector<TaskSample> takeSamples() {
@@ -275,9 +314,15 @@ private:
         }
     }
 
-    void startTickStatsLocked() {
+    void startTickStatsLocked(std::size_t active_time_weight) {
         current_tick_start_ = Clock::now();
         current_worker_idle_time_ = Duration{0};
+        current_task_active_time_ = Duration{0};
+        current_task_active_time_weight_ = active_time_weight == 0 ? 1 : active_time_weight;
+        current_resume_count_ = 0;
+        current_tick_done_count_ = 0;
+        current_deferred_resume_count_ = 0;
+        current_sleep_count_ = 0;
         for (auto& idle_since : worker_idle_since_) {
             idle_since = TimePoint{};
         }
@@ -290,8 +335,13 @@ private:
             current_worker_idle_time_,
             std::chrono::duration_cast<Duration>((end_time - current_tick_start_) *
                                                  worker_count_),
+            current_task_active_time_ * current_task_active_time_weight_,
             worker_count_,
             1,
+            current_resume_count_,
+            current_tick_done_count_,
+            current_deferred_resume_count_,
+            current_sleep_count_,
         });
     }
 
@@ -332,6 +382,100 @@ private:
         handle.promise().active_time = Duration{0};
     }
 
+    bool canScheduleLocal(Handle handle) const noexcept {
+        return local_scheduler_ == this && local_ready_ &&
+               !handle.promise().persistent_wait &&
+               handle.promise().dispatch_epoch == dispatch_epoch_;
+    }
+
+    bool tryScheduleLocal(Handle handle) {
+        if (!canScheduleLocal(handle)) {
+            return false;
+        }
+        local_ready_->push_back(handle);
+        return true;
+    }
+
+    bool tryScheduleLocal(const std::vector<Handle>& handles) {
+        for (auto handle : handles) {
+            if (!handle || !canScheduleLocal(handle)) {
+                return false;
+            }
+        }
+        local_ready_->insert(local_ready_->end(), handles.begin(), handles.end());
+        return true;
+    }
+
+    bool scheduleLocked(Handle handle) {
+        if (stopping_ || !dispatching_ || first_exception_) {
+            return false;
+        }
+        if (handle.promise().persistent_wait) {
+            handle.promise().persistent_wait = false;
+            if (handle.promise().persistent_wait_counted) {
+                handle.promise().persistent_wait_counted = false;
+                --sleeping_count_;
+            }
+        }
+        if (handle.promise().dispatch_epoch != dispatch_epoch_) {
+            prepareForCurrentTickLocked(handle);
+        }
+        ready_.push_back(handle);
+        return true;
+    }
+
+    void runCoordinatorLocked(std::unique_lock<std::mutex>& lock) {
+        while (true) {
+            if (first_exception_) {
+                failed_ = true;
+                finishTickStatsLocked(Clock::now());
+                dispatching_ = false;
+                work_cv_.notify_all();
+                done_cv_.wait(lock, [this] { return active_ == 0; });
+
+                auto exception = first_exception_;
+                lock.unlock();
+                std::rethrow_exception(exception);
+            }
+
+            if (active_ == 0 && ready_.empty() &&
+                live_ == next_tick_count_ + sleeping_count_) {
+                finishTickStatsLocked(Clock::now());
+                dispatching_ = false;
+                return;
+            }
+
+            if (ready_.empty() && active_ == 0) {
+                failed_ = true;
+                finishTickStatsLocked(Clock::now());
+                dispatching_ = false;
+                first_exception_ = std::make_exception_ptr(std::runtime_error(
+                    "deadlock: current tick drained while coroutine(s) are still waiting"));
+                work_cv_.notify_all();
+                auto exception = first_exception_;
+                lock.unlock();
+                std::rethrow_exception(exception);
+            }
+
+            if (!ready_.empty()) {
+                stopWorkerIdleLocked(0);
+                auto handle = ready_.front();
+                ready_.pop_front();
+                ++active_;
+                lock.unlock();
+                runOne(handle);
+                lock.lock();
+                continue;
+            }
+
+            startWorkerIdleLocked(0);
+            done_cv_.wait(lock, [this] {
+                return first_exception_ || !ready_.empty() || active_ == 0;
+            });
+            stopWorkerIdleLocked(0);
+        }
+    }
+
     void workerLoop(std::size_t worker_index) noexcept {
         for (;;) {
             Handle handle{};
@@ -368,6 +512,12 @@ private:
 
     void runOne(Handle handle) noexcept {
         std::exception_ptr resume_exception;
+        Duration elapsed{0};
+        std::vector<Handle> local_ready;
+        auto* previous_local_ready = local_ready_;
+        auto* previous_local_scheduler = local_scheduler_;
+        local_ready_ = &local_ready;
+        local_scheduler_ = this;
 
         if (handle.promise().profile_active_time) {
             const auto start = Clock::now();
@@ -377,8 +527,7 @@ private:
             } catch (...) {
                 resume_exception = std::current_exception();
             }
-            const auto elapsed =
-                std::chrono::duration_cast<Duration>(Clock::now() - start);
+            elapsed = std::chrono::duration_cast<Duration>(Clock::now() - start);
             handle.promise().active_time += elapsed;
         } else {
             try {
@@ -388,6 +537,8 @@ private:
                 resume_exception = std::current_exception();
             }
         }
+        local_ready_ = previous_local_ready;
+        local_scheduler_ = previous_local_scheduler;
 
         std::exception_ptr coroutine_exception;
         TaskSample sample;
@@ -397,6 +548,9 @@ private:
                                   handle.promise().deferred_resume;
         const bool tick_done = !resume_exception && !done &&
                                handle.promise().tick_done;
+        bool notify_coordinator = false;
+        bool notify_worker = false;
+        bool notify_all_workers = false;
         handle.promise().deferred_resume = false;
         handle.promise().tick_done = false;
         if (done) {
@@ -418,6 +572,10 @@ private:
         {
             std::lock_guard lock(mutex_);
             --active_;
+            ++current_resume_count_;
+            if (handle.promise().profile_active_time) {
+                current_task_active_time_ += elapsed;
+            }
 
             if (done) {
                 if (has_sample) {
@@ -427,6 +585,7 @@ private:
                 forgetLocked(handle);
                 --live_;
             } else if (tick_done && !stopping_ && dispatching_ && !first_exception_) {
+                ++current_tick_done_count_;
                 if (handle.promise().profile_active_time) {
                     samples_.push_back(TaskSample{
                         handle.promise().component_id,
@@ -442,24 +601,43 @@ private:
                 }
                 next_tick_[component_id] = handle;
             } else if (should_defer && !stopping_ && dispatching_ && !first_exception_) {
+                ++current_deferred_resume_count_;
                 ready_.push_back(handle);
             } else if (handle.promise().persistent_wait && !stopping_ && dispatching_ &&
                        !first_exception_) {
                 if (!handle.promise().persistent_wait_counted) {
                     handle.promise().persistent_wait_counted = true;
                     ++sleeping_count_;
+                    ++current_sleep_count_;
                 }
+            }
+
+            if (!local_ready.empty() && !stopping_ && dispatching_ &&
+                !first_exception_) {
+                ready_.insert(ready_.end(), local_ready.begin(), local_ready.end());
             }
 
             if (resume_exception && !first_exception_) {
                 first_exception_ = resume_exception;
+                notify_all_workers = true;
             } else if (coroutine_exception && !first_exception_) {
                 first_exception_ = coroutine_exception;
+                notify_all_workers = true;
             }
+
+            notify_coordinator = first_exception_ || !ready_.empty() || active_ == 0;
+            notify_worker = !ready_.empty() && !stopping_ && dispatching_ &&
+                            !first_exception_;
         }
 
-        done_cv_.notify_all();
-        work_cv_.notify_all();
+        if (notify_coordinator) {
+            done_cv_.notify_one();
+        }
+        if (notify_all_workers) {
+            work_cv_.notify_all();
+        } else if (notify_worker) {
+            work_cv_.notify_one();
+        }
     }
 
     void forgetLocked(Handle handle) {
@@ -484,16 +662,25 @@ private:
     ProfilingStats profiling_stats_;
     TimePoint current_tick_start_;
     Duration current_worker_idle_time_{0};
+    Duration current_task_active_time_{0};
+    std::size_t current_task_active_time_weight_ = 1;
     std::size_t live_ = 0;
     std::size_t active_ = 0;
     std::size_t next_tick_count_ = 0;
     std::size_t sleeping_count_ = 0;
     std::size_t dispatch_epoch_ = 0;
+    std::size_t current_resume_count_ = 0;
+    std::size_t current_tick_done_count_ = 0;
+    std::size_t current_deferred_resume_count_ = 0;
+    std::size_t current_sleep_count_ = 0;
     bool current_profile_active_time_ = false;
     bool dispatching_ = false;
     bool stopping_ = false;
     bool failed_ = false;
     std::exception_ptr first_exception_;
+
+    inline static thread_local Scheduler* local_scheduler_ = nullptr;
+    inline static thread_local std::vector<Handle>* local_ready_ = nullptr;
 };
 
 } // namespace coropulse

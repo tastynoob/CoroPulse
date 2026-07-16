@@ -132,6 +132,10 @@ public:
         return scheduler_.workerIdleRatio();
     }
 
+    Scheduler::ProfilingStats profilingStats() const {
+        return scheduler_.profilingStats();
+    }
+
     void runTick() {
         ++tick_;
 
@@ -142,8 +146,14 @@ public:
         tick_context_.reset(tick_, scheduler_);
 
         rebuildComponentOrder();
-        scheduler_.run(component_order_, load_balancing_enabled_);
-        auto samples = scheduler_.takeSamples();
+        const bool profile_load_balance =
+            load_balancing_enabled_ && load_balance_window_ != 0 &&
+            (needsInitialProfile() ||
+             tick_ % static_cast<TickId>(load_balance_window_) == 0);
+        scheduler_.run(component_order_, profile_load_balance,
+                       profile_load_balance ? load_balance_window_ : 1);
+        auto samples = profile_load_balance ? scheduler_.takeSamples()
+                                            : std::vector<Scheduler::TaskSample>{};
 
         for (auto* object : objects_) {
             object->commit(tick_);
@@ -153,7 +163,7 @@ public:
             object->endTick(tick_);
         }
 
-        if (load_balancing_enabled_) {
+        if (profile_load_balance) {
             recordSamples(samples);
         }
     }
@@ -219,6 +229,15 @@ private:
             profile.samples.push_back(sample.active_time);
             profile.total += sample.active_time;
         }
+    }
+
+    bool needsInitialProfile() const {
+        for (const auto& profile : profiles_) {
+            if (profile.samples.empty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     void trimProfiles() {
