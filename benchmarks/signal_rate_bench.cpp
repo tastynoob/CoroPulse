@@ -96,8 +96,8 @@ public:
 
         std::optional<std::uint64_t> input_value;
         if (has_input_ && local_accept) {
-            input_value = in.read();
-            if (input_value) {
+            if (auto input = in.read()) {
+                input_value = *input;
                 ++accepted_input_;
                 state_ ^= *input_value + stage_id_ * 0x517cc1b727220a95ULL;
             }

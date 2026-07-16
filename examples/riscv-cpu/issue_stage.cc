@@ -25,7 +25,6 @@ coropulse::Task<void> IssueStage::process() {
             completed_.clear();
             (void)completion_in.read();
             (void)rename_in.read();
-            can_accept.set(true);
             continue;
         }
 

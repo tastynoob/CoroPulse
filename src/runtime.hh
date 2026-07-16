@@ -106,11 +106,13 @@ public:
 
         load_balance_window_ = window_ticks;
         load_balancing_enabled_ = true;
+        component_order_dirty_ = true;
         trimProfiles();
     }
 
     void disableLoadBalancing() noexcept {
         load_balancing_enabled_ = false;
+        component_order_dirty_ = true;
     }
 
     void addComponent(Component& component) {
@@ -118,6 +120,7 @@ public:
         auto process = component.process();
         components_.push_back(&component);
         profiles_.emplace_back();
+        component_order_dirty_ = true;
         component.ctx_ = &tick_context_;
         scheduler_.addProcess(std::move(process), component_id, &tick_context_);
     }
@@ -145,11 +148,11 @@ public:
 
         tick_context_.reset(tick_, scheduler_);
 
-        rebuildComponentOrder();
         const bool profile_load_balance =
             load_balancing_enabled_ && load_balance_window_ != 0 &&
             (needsInitialProfile() ||
              tick_ % static_cast<TickId>(load_balance_window_) == 0);
+        ensureComponentOrder();
         scheduler_.run(component_order_, profile_load_balance,
                        profile_load_balance ? load_balance_window_ : 1);
         auto samples = profile_load_balance ? scheduler_.takeSamples()
@@ -165,6 +168,7 @@ public:
 
         if (profile_load_balance) {
             recordSamples(samples);
+            component_order_dirty_ = true;
         }
     }
 
@@ -190,6 +194,13 @@ private:
         }
         return profile.total /
                static_cast<Scheduler::Duration::rep>(profile.samples.size());
+    }
+
+    void ensureComponentOrder() {
+        if (component_order_dirty_) {
+            rebuildComponentOrder();
+            component_order_dirty_ = false;
+        }
     }
 
     void rebuildComponentOrder() {
@@ -258,6 +269,7 @@ private:
     std::vector<ComponentProfile> profiles_;
     std::vector<std::size_t> component_order_;
     std::size_t load_balance_window_ = 0;
+    bool component_order_dirty_ = true;
     bool load_balancing_enabled_ = false;
 };
 

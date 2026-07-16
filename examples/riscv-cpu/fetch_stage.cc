@@ -17,11 +17,13 @@ FetchStage::FetchStage(const SimpleSram& sram, DynInstPool& inst_pool,
 
 coropulse::Task<void> FetchStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
+        bool fifo_ready = true;
         if (auto redirect = redirect_in.read()) {
             applyRedirect(*redirect);
+        } else {
+            fifo_ready = co_await fifo_can_accept.read();
         }
 
-        const bool fifo_ready = co_await fifo_can_accept.read();
         if (halted_) {
             continue;
         }
@@ -101,14 +103,13 @@ FetchDecodeFifo::FetchDecodeFifo(std::size_t capacity, std::size_t fetch_width,
 
 coropulse::Task<void> FetchDecodeFifo::process() {
     for (;; co_yield coropulse::tickDone{}) {
-        const bool decode_ready = co_await decode_can_accept.read();
-
         if (redirect_in.read()) {
             queue_.clear();
-            (void)in.read();
-            can_accept.set(true);
+            (void)in.take();
             continue;
         }
+
+        const bool decode_ready = co_await decode_can_accept.read();
 
         if (decode_ready && !queue_.empty() && out.canWrite()) {
             (void)out.write(popDecodeBundle());
@@ -121,7 +122,7 @@ coropulse::Task<void> FetchDecodeFifo::process() {
         }
 
         if (input_ready) {
-            if (auto fetched = in.read()) {
+            if (auto fetched = in.take()) {
                 for (auto* inst : *fetched) {
                     queue_.push_back(inst);
                 }

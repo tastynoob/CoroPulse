@@ -1,28 +1,27 @@
 #include "stages.hh"
 
+#include <utility>
+
 namespace riscv_cpu {
 
 coropulse::Task<void> DecodeStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
         const bool flushing = redirect_in.read().has_value();
         if (flushing) {
-            (void)in.read();
+            (void)in.take();
+            continue;
         }
 
         const bool rename_ready = co_await rename_can_accept.read();
         const bool input_ready = rename_ready && out.canWrite();
         can_accept.set(input_ready);
 
-        if (flushing) {
-            continue;
-        }
-
         if (!input_ready && in.hasValue()) {
             ++backpressure_stalls_;
         }
 
         if (input_ready) {
-            if (auto fetched = in.read()) {
+            if (auto fetched = in.take()) {
                 decoded_ += fetched->size();
                 (void)out.write(std::move(*fetched));
             }

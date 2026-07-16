@@ -6,7 +6,8 @@
 namespace riscv_cpu {
 namespace {
 
-void discardBundle(CoreState& core, const std::optional<InstBundle>& bundle) {
+template <class BundleRef>
+void discardBundle(CoreState& core, const BundleRef& bundle) {
     if (!bundle) {
         return;
     }

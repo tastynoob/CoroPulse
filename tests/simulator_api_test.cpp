@@ -37,7 +37,8 @@ public:
     explicit ApiConsumer(std::vector<std::optional<int>>& reads) : reads_(reads) {}
 
     MAKE_PROCESS({
-        reads_.push_back(in.read());
+        auto value = in.read();
+        reads_.push_back(value ? std::optional<int>{*value} : std::nullopt);
     })
 
 private:

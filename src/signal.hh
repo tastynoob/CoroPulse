@@ -95,7 +95,6 @@ private:
     }
 
     void beginTick(TickId tick) override {
-        std::lock_guard lock(mutex_);
         tick_ = tick;
         ready_ = false;
         payload_.reset();
@@ -106,7 +105,6 @@ private:
     void commit(TickId) override {}
 
     void endTick(TickId) override {
-        std::lock_guard lock(mutex_);
         if (!read_waiters_.empty()) {
             throw std::runtime_error(
                 objectError("signal", name_, "tick ended with pending waiters"));
@@ -140,6 +138,7 @@ private:
     template <class... Args>
     void setReady(TickContext& ctx, Args&&... args) {
         std::vector<Scheduler::Handle> waiters;
+        Scheduler::Handle single_waiter{};
 
         {
             std::lock_guard lock(mutex_);
@@ -153,13 +152,29 @@ private:
 
             ready_ = true;
             payload_.set(std::forward<Args>(args)...);
-            waiters = std::move(read_waiters_);
-            read_waiters_.clear();
-            waiters.insert(waiters.end(), wait_waiters_.begin(), wait_waiters_.end());
-            wait_waiters_.clear();
+            const auto waiter_count = read_waiters_.size() + wait_waiters_.size();
+            if (waiter_count == 1) {
+                if (!read_waiters_.empty()) {
+                    single_waiter = read_waiters_.front();
+                    read_waiters_.clear();
+                } else {
+                    single_waiter = wait_waiters_.front();
+                    wait_waiters_.clear();
+                }
+            } else if (waiter_count > 1) {
+                waiters.reserve(waiter_count);
+                waiters.insert(waiters.end(), read_waiters_.begin(), read_waiters_.end());
+                waiters.insert(waiters.end(), wait_waiters_.begin(), wait_waiters_.end());
+                read_waiters_.clear();
+                wait_waiters_.clear();
+            }
         }
 
-        ctx.scheduler().scheduleMany(std::move(waiters));
+        if (single_waiter) {
+            ctx.scheduler().schedule(single_waiter);
+        } else {
+            ctx.scheduler().scheduleMany(std::move(waiters));
+        }
     }
 
     bool awaitReady(std::size_t reader_id, TickContext& ctx) {

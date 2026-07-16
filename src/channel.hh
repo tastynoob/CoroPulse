@@ -18,6 +18,40 @@ template <class T>
 class Input;
 
 template <class T>
+class ReadRef {
+public:
+    ReadRef() = default;
+    explicit ReadRef(const T* value) noexcept : value_(value) {}
+
+    explicit operator bool() const noexcept { return value_ != nullptr; }
+    bool has_value() const noexcept { return value_ != nullptr; }
+
+    const T& operator*() const {
+        ensure();
+        return *value_;
+    }
+
+    const T* operator->() const {
+        ensure();
+        return value_;
+    }
+
+    const T& value() const {
+        ensure();
+        return *value_;
+    }
+
+private:
+    void ensure() const {
+        if (!value_) {
+            throw std::runtime_error("read reference has no value");
+        }
+    }
+
+    const T* value_ = nullptr;
+};
+
+template <class T>
 class Channel final : public TickObject {
 public:
     explicit Channel(std::string name = {}) : name_(std::move(name)) {}
@@ -43,7 +77,6 @@ private:
     }
 
     void beginTick(TickId tick) override {
-        std::lock_guard lock(mutex_);
         tick_ = tick;
         pending_write_.reset();
 
@@ -59,7 +92,6 @@ private:
     }
 
     void commit(TickId tick) override {
-        std::lock_guard lock(mutex_);
         if (tick != tick_) {
             throw std::runtime_error(objectError("channel", name_, "commit with stale tick"));
         }
@@ -80,7 +112,6 @@ private:
     }
 
     void endTick(TickId) override {
-        std::lock_guard lock(mutex_);
         discardConsumedVisibleLocked();
     }
 
@@ -110,13 +141,36 @@ private:
         return true;
     }
 
-    std::optional<T> read(TickContext& ctx, std::size_t reader_id) {
+    ReadRef<T> read(TickContext& ctx, std::size_t reader_id) {
         std::lock_guard lock(mutex_);
         if (ctx.tick() != tick_) {
             throw std::runtime_error(objectError("channel", name_, "read with stale context"));
         }
         if (reader_id >= reader_count_) {
             throw std::runtime_error(objectError("channel", name_, "invalid reader id"));
+        }
+        if (!visible_) {
+            return ReadRef<T>{};
+        }
+        if (visible_->consumed_by[reader_id]) {
+            return ReadRef<T>{};
+        }
+
+        visible_->consumed_by[reader_id] = true;
+        return ReadRef<T>(&visible_->value);
+    }
+
+    std::optional<T> take(TickContext& ctx, std::size_t reader_id) {
+        std::lock_guard lock(mutex_);
+        if (ctx.tick() != tick_) {
+            throw std::runtime_error(objectError("channel", name_, "take with stale context"));
+        }
+        if (reader_id >= reader_count_) {
+            throw std::runtime_error(objectError("channel", name_, "invalid reader id"));
+        }
+        if (reader_count_ != 1) {
+            throw std::runtime_error(objectError("channel", name_,
+                                                 "take requires exactly one reader"));
         }
         if (!visible_) {
             return std::nullopt;
@@ -126,7 +180,9 @@ private:
         }
 
         visible_->consumed_by[reader_id] = true;
-        return visible_->value;
+        auto value = std::move(visible_->value);
+        visible_.reset();
+        return value;
     }
 
     bool hasValue(TickContext& ctx, std::size_t reader_id) const {
@@ -239,9 +295,14 @@ public:
         return channel_->hasValue(detail::currentTickContext(), reader_id_);
     }
 
-    std::optional<T> read() const {
+    ReadRef<T> read() const {
         ensure();
         return channel_->read(detail::currentTickContext(), reader_id_);
+    }
+
+    std::optional<T> take() const {
+        ensure();
+        return channel_->take(detail::currentTickContext(), reader_id_);
     }
 
 private:

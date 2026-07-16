@@ -32,7 +32,8 @@ struct RecordingConsumer final : Component {
     explicit RecordingConsumer(std::vector<std::optional<int>>& reads) : reads(reads) {}
 
     MAKE_PROCESS({
-        reads.push_back(in.read());
+        auto value = in.read();
+        reads.push_back(value ? std::optional<int>{*value} : std::nullopt);
     })
 };
 

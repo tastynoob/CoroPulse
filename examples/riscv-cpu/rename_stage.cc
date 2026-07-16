@@ -1,6 +1,7 @@
 #include "stages.hh"
 
 #include <stdexcept>
+#include <utility>
 
 namespace riscv_cpu {
 
@@ -16,18 +17,15 @@ coropulse::Task<void> RenameStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
         const bool flushing = redirect_in.read().has_value();
         if (flushing) {
-            (void)in.read();
+            (void)in.take();
             core_.completeRedirectFlush();
+            continue;
         }
 
         const bool issue_ready = co_await issue_can_accept.read();
         const bool resource_ready = core_.freePhysicalRegisters() >= rename_width_;
         const bool input_ready = issue_ready && resource_ready && out.canWrite();
         can_accept.set(input_ready);
-
-        if (flushing) {
-            continue;
-        }
 
         if (!issue_ready && in.hasValue()) {
             ++issue_backpressure_stalls_;
@@ -37,7 +35,7 @@ coropulse::Task<void> RenameStage::process() {
         }
 
         if (input_ready) {
-            if (auto decoded = in.read()) {
+            if (auto decoded = in.take()) {
                 for (auto* inst : *decoded) {
                     core_.rename(inst);
                 }

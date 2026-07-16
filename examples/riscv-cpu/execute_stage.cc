@@ -28,7 +28,7 @@ coropulse::Task<void> ExecuteStage::process() {
         if (redirect_in.read()) {
             executing_.clear();
             pending_completion_.clear();
-            (void)issue_in.read();
+            (void)issue_in.take();
             continue;
         }
 
@@ -36,7 +36,7 @@ coropulse::Task<void> ExecuteStage::process() {
         completeReadyUops();
         publishCompletion();
 
-        if (auto issued = issue_in.read()) {
+        if (auto issued = issue_in.take()) {
             for (auto* inst : *issued) {
                 inst->executeState().done_tick = currentTick() + inst->staticInst().latency;
                 executing_.push_back(Executing{

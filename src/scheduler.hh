@@ -513,7 +513,8 @@ private:
     void runOne(Handle handle) noexcept {
         std::exception_ptr resume_exception;
         Duration elapsed{0};
-        std::vector<Handle> local_ready;
+        auto& local_ready = local_ready_storage_;
+        local_ready.clear();
         auto* previous_local_ready = local_ready_;
         auto* previous_local_scheduler = local_scheduler_;
         local_ready_ = &local_ready;
@@ -615,6 +616,7 @@ private:
             if (!local_ready.empty() && !stopping_ && dispatching_ &&
                 !first_exception_) {
                 ready_.insert(ready_.end(), local_ready.begin(), local_ready.end());
+                local_ready.clear();
             }
 
             if (resume_exception && !first_exception_) {
@@ -681,6 +683,7 @@ private:
 
     inline static thread_local Scheduler* local_scheduler_ = nullptr;
     inline static thread_local std::vector<Handle>* local_ready_ = nullptr;
+    inline static thread_local std::vector<Handle> local_ready_storage_;
 };
 
 } // namespace coropulse
