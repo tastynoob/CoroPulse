@@ -24,7 +24,7 @@ bool IssuePipe::canAcceptDispatch() const {
     return queue_.size() + dispatch_width_ <= capacity_;
 }
 
-void IssuePipe::rememberCompletions(const ExecResultBundle& completions) {
+void IssuePipe::rememberCompletions(const InstBundle& completions) {
     for (const auto& completion : completions) {
         rememberCompletion(completion);
     }
@@ -52,11 +52,7 @@ InstBundle IssuePipe::issue(BackendStats& stats) {
     InstBundle bundle;
     bundle.reserve(ready.size());
     for (auto index : ready) {
-        auto& entry = queue_[index];
-        auto& rename = entry.inst->renameState();
-        rename.src1 = entry.src1;
-        rename.src2 = entry.src2;
-        bundle.push_back(entry.inst);
+        bundle.push_back(queue_[index].inst);
     }
 
     for (auto iter = ready.rbegin(); iter != ready.rend(); ++iter) {
@@ -72,17 +68,19 @@ void IssuePipe::clear() {
 }
 
 bool IssuePipe::operandsReady(const Entry& entry) const {
-    return entry.src1.ready && entry.src2.ready;
+    const auto& rename = entry.inst->renameState();
+    return rename.src1.ready && rename.src2.ready;
 }
 
 bool IssuePipe::canIssue(const Entry& entry) const {
     if (!operandsReady(entry)) {
         return false;
     }
-    if (!entry.memory) {
+    const auto& rename = entry.inst->renameState();
+    if (!rename.memory) {
         return true;
     }
-    return core_.memoryOrderReady(entry.inst->renameState().sequence);
+    return core_.memoryOrderReady(rename.sequence);
 }
 
 std::vector<std::size_t> IssuePipe::findReadyBundle() const {
@@ -100,37 +98,39 @@ std::vector<std::size_t> IssuePipe::findReadyBundle() const {
 }
 
 IssuePipe::Entry IssuePipe::makeEntry(DynInstPtr inst) const {
-    const auto& rename = inst->renameState();
-    return Entry{
-        inst,
-        rename.src1,
-        rename.src2,
-        rename.memory,
-    };
+    return Entry{inst};
 }
 
-void IssuePipe::rememberCompletion(const ExecResult& completion) {
-    if (completion.sequence >= completed_.size()) {
-        completed_.resize(completion.sequence + 1);
+void IssuePipe::rememberCompletion(DynInstPtr completion) {
+    if (!completion) {
+        throw std::runtime_error("issue pipe received an empty completion");
     }
-    completed_[completion.sequence] = completion;
+
+    const auto sequence = completion->renameState().sequence;
+    if (sequence >= completed_.size()) {
+        completed_.resize(sequence + 1);
+    }
+    completed_[sequence] = 1;
     applyWakeup(completion);
 }
 
-void IssuePipe::applyWakeup(const ExecResult& completion) {
-    if (!completion.writes_rd) {
+void IssuePipe::applyWakeup(DynInstPtr completion) {
+    const auto& rename = completion->renameState();
+    if (!rename.writes_rd) {
         return;
     }
 
     for (auto& entry : queue_) {
-        wakeOperand(entry.src1, completion);
-        wakeOperand(entry.src2, completion);
+        auto& rename = entry.inst->renameState();
+        wakeOperand(rename.src1, completion);
+        wakeOperand(rename.src2, completion);
     }
 }
 
 void IssuePipe::applyKnownWakeups(Entry& entry) const {
-    applyKnownWakeup(entry.src1);
-    applyKnownWakeup(entry.src2);
+    auto& rename = entry.inst->renameState();
+    applyKnownWakeup(rename.src1);
+    applyKnownWakeup(rename.src2);
 }
 
 void IssuePipe::applyKnownWakeup(Operand& operand) const {
@@ -138,17 +138,15 @@ void IssuePipe::applyKnownWakeup(Operand& operand) const {
         return;
     }
 
-    const auto& completion = completed_[operand.producer];
-    if (completion && completion->writes_rd) {
+    if (completed_[operand.producer] != 0) {
         operand.ready = true;
-        operand.value = completion->value;
     }
 }
 
-void IssuePipe::wakeOperand(Operand& operand, const ExecResult& completion) {
-    if (!operand.ready && operand.producer == completion.sequence) {
+void IssuePipe::wakeOperand(Operand& operand, DynInstPtr producer) {
+    const auto& rename = producer->renameState();
+    if (!operand.ready && operand.producer == rename.sequence) {
         operand.ready = true;
-        operand.value = completion.value;
     }
 }
 

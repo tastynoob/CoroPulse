@@ -84,7 +84,7 @@ RetireResult CommitPipe::retire(coropulse::TickId tick, BackendStats& stats) {
     return result;
 }
 
-void CommitPipe::markCompleted(const ExecResultBundle& bundle) {
+void CommitPipe::markCompleted(const InstBundle& bundle) {
     for (const auto& completion : bundle) {
         core_.markCompleted(completion);
     }

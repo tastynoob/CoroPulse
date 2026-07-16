@@ -70,7 +70,7 @@ BackendPipeline::BackendPipeline(CoreState& core, SimpleSram& sram,
                                  std::size_t trace_limit)
     : frontend_queue(frontend_queue_capacity, fetch_width, decode_width),
       issue(core, issue_capacity, dispatch_width, issue_width),
-      execute(sram),
+      execute(core, sram),
       commit(core, sram, commit_width, trace_out, trace_limit),
       rename_width_(rename_width) {
     if (rename_width_ == 0 || commit_width == 0) {

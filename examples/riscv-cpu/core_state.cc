@@ -8,7 +8,8 @@
 namespace riscv_cpu {
 
 CoreState::CoreState(std::size_t physical_registers)
-    : physical_register_count_(physical_registers) {
+    : physical_register_count_(physical_registers),
+      physical_regs_(physical_registers, 0) {
     if (physical_registers < registers_.size()) {
         throw std::runtime_error("physical register count must cover architectural registers");
     }
@@ -110,17 +111,20 @@ void CoreState::completeRedirectFlush() {
     restoreSpeculativeRenameMapLocked();
 }
 
-void CoreState::markCompleted(const ExecResult& result) {
+void CoreState::markCompleted(DynInstPtr dyn_inst) {
     std::lock_guard lock(mutex_);
-    if (result.sequence >= rob_.size()) {
+    if (!dyn_inst) {
+        throw std::runtime_error("completion has no dyninst");
+    }
+
+    const auto sequence = dyn_inst->renameState().sequence;
+    if (sequence >= rob_.size()) {
         throw std::runtime_error("completion references an unknown rob entry");
     }
-    auto& entry = rob_[result.sequence];
-    if (entry.inst != result.inst) {
+    auto& entry = rob_[sequence];
+    if (entry.inst != dyn_inst) {
         throw std::runtime_error("completion dyninst does not match rob entry");
     }
-    entry.inst->executeState().value = result.value;
-    entry.inst->executeState().store = result.store;
     entry.inst->commitState().completed = true;
 }
 
@@ -137,6 +141,8 @@ RetireResult CoreState::retire(std::size_t max_count) {
         const auto& inst = entry.inst->staticInst();
         const auto& rename = entry.inst->renameState();
         const auto& execute = entry.inst->executeState();
+        const auto value =
+            rename.writes_rd ? physical_regs_[rename.phys_dst] : std::uint64_t{0};
         result.trace.push_back(RetiredInstTrace{
             rename.sequence,
             entry.inst->pc(),
@@ -144,7 +150,7 @@ RetireResult CoreState::retire(std::size_t max_count) {
             inst.opcode,
             rename.writes_rd,
             inst.rd,
-            execute.value,
+            value,
             execute.store,
             execute.redirect,
         });
@@ -158,7 +164,6 @@ RetireResult CoreState::retire(std::size_t max_count) {
             auto& reg = registers_[static_cast<std::size_t>(inst.rd)];
             free_phys_regs_.push_back(reg.committed_phys);
             reg.committed_phys = rename.phys_dst;
-            reg.value = execute.value;
             if (reg.producer && *reg.producer == rename.sequence) {
                 reg.producer.reset();
             }
@@ -206,7 +211,7 @@ std::uint64_t CoreState::registerValue(int reg) const {
     if (reg == 0) {
         return 0;
     }
-    return registers_[static_cast<std::size_t>(reg)].value;
+    return physical_regs_[registers_[static_cast<std::size_t>(reg)].committed_phys];
 }
 
 std::size_t CoreState::freePhysicalRegisters() const {
@@ -218,6 +223,15 @@ std::size_t CoreState::physicalRegisterCount() const noexcept {
     return physical_register_count_;
 }
 
+std::uint64_t CoreState::readPhysicalRegister(std::size_t phys) const noexcept {
+    return physical_regs_[phys];
+}
+
+void CoreState::writePhysicalRegister(std::size_t phys,
+                                      std::uint64_t value) noexcept {
+    physical_regs_[phys] = value;
+}
+
 Operand CoreState::readSourceLocked(int reg) const {
     if (reg == 0) {
         return Operand{true, 0, 0};
@@ -226,15 +240,15 @@ Operand CoreState::readSourceLocked(int reg) const {
     const auto& state = registers_[static_cast<std::size_t>(reg)];
     if (state.producer) {
         if (*state.producer >= rob_.size()) {
-            return Operand{false, 0, *state.producer};
+            return Operand{false, state.phys, *state.producer};
         }
         const auto* producer = rob_.at(*state.producer).inst;
         if (producer->commitState().completed) {
-            return Operand{true, producer->executeState().value, 0};
+            return Operand{true, state.phys, 0};
         }
-        return Operand{false, 0, *state.producer};
+        return Operand{false, state.phys, *state.producer};
     }
-    return Operand{true, state.value, 0};
+    return Operand{true, state.phys, 0};
 }
 
 void CoreState::flushAfterRedirectLocked(std::size_t redirect_sequence) {

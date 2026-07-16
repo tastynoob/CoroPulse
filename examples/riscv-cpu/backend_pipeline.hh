@@ -83,7 +83,7 @@ public:
               std::size_t issue_width);
 
     bool canAcceptDispatch() const;
-    void rememberCompletions(const ExecResultBundle& completions);
+    void rememberCompletions(const InstBundle& completions);
     void acceptRenamed(const InstBundle& bundle, BackendStats& stats);
     InstBundle issue(BackendStats& stats);
     void clear();
@@ -91,35 +91,32 @@ public:
 private:
     struct Entry {
         DynInstPtr inst = nullptr;
-        Operand src1;
-        Operand src2;
-        bool memory = false;
     };
 
     bool operandsReady(const Entry& entry) const;
     bool canIssue(const Entry& entry) const;
     std::vector<std::size_t> findReadyBundle() const;
     Entry makeEntry(DynInstPtr inst) const;
-    void rememberCompletion(const ExecResult& completion);
-    void applyWakeup(const ExecResult& completion);
+    void rememberCompletion(DynInstPtr completion);
+    void applyWakeup(DynInstPtr completion);
     void applyKnownWakeups(Entry& entry) const;
     void applyKnownWakeup(Operand& operand) const;
-    static void wakeOperand(Operand& operand, const ExecResult& completion);
+    static void wakeOperand(Operand& operand, DynInstPtr producer);
 
     CoreState& core_;
     std::size_t capacity_;
     std::size_t dispatch_width_;
     std::size_t issue_width_;
     std::vector<Entry> queue_;
-    std::vector<std::optional<ExecResult>> completed_;
+    std::vector<char> completed_;
 };
 
 class ExecutePipe {
 public:
-    explicit ExecutePipe(SimpleSram& sram);
+    ExecutePipe(CoreState& core, SimpleSram& sram);
 
     void accept(InstBundle&& bundle, coropulse::TickId tick, BackendStats& stats);
-    ExecResultBundle collectCompletions(coropulse::TickId tick, BackendStats& stats);
+    InstBundle collectCompletions(coropulse::TickId tick, BackendStats& stats);
     void clear();
 
 private:
@@ -128,12 +125,13 @@ private:
         coropulse::TickId done_tick = 0;
     };
 
-    ExecResult execute(DynInstPtr inst, coropulse::TickId tick);
+    void execute(DynInstPtr inst, coropulse::TickId tick);
     void completeReadyUops(coropulse::TickId tick);
 
+    CoreState& core_;
     SimpleSram& sram_;
     std::vector<Executing> executing_;
-    ExecResultBundle pending_completion_;
+    InstBundle pending_completion_;
 };
 
 class CommitPipe {
@@ -148,7 +146,7 @@ public:
     bool publishPredictorUpdates(coropulse::Output<BranchUpdateBundle>& output);
     void queuePredictorUpdates(BranchUpdateBundle&& updates);
     RetireResult retire(coropulse::TickId tick, BackendStats& stats);
-    void markCompleted(const ExecResultBundle& bundle);
+    void markCompleted(const InstBundle& bundle);
     void dispatch(const InstBundle& bundle);
     void discard(const InstBundle* bundle);
     void completeRedirectFlush();

@@ -17,7 +17,7 @@ using InstBundle = std::vector<DynInstPtr>;
 
 struct Operand {
     bool ready = true;
-    std::uint64_t value = 0;
+    std::size_t phys = 0;
     std::size_t producer = 0;
 };
 
@@ -87,7 +87,6 @@ struct StoreWrite {
 };
 
 struct ExecuteState {
-    std::uint64_t value = 0;
     coropulse::TickId done_tick = 0;
     std::optional<ControlRedirect> redirect;
     std::optional<BranchUpdate> branch_update;
@@ -97,16 +96,6 @@ struct ExecuteState {
 struct CommitState {
     bool completed = false;
 };
-
-struct ExecResult {
-    std::size_t sequence = 0;
-    DynInstPtr inst = nullptr;
-    std::uint64_t value = 0;
-    bool writes_rd = false;
-    std::optional<StoreWrite> store;
-};
-
-using ExecResultBundle = std::vector<ExecResult>;
 
 struct RetiredInstTrace {
     std::size_t sequence = 0;

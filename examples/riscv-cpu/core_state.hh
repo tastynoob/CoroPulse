@@ -20,7 +20,7 @@ public:
     void dispatchRenamed(DynInstPtr inst);
     void discardRenamed(DynInstPtr inst);
     void completeRedirectFlush();
-    void markCompleted(const ExecResult& result);
+    void markCompleted(DynInstPtr inst);
     RetireResult retire(std::size_t max_count);
     bool memoryOrderReady(std::size_t sequence) const;
     std::size_t committedCount() const;
@@ -28,10 +28,11 @@ public:
     std::uint64_t registerValue(int reg) const;
     std::size_t freePhysicalRegisters() const;
     std::size_t physicalRegisterCount() const noexcept;
+    std::uint64_t readPhysicalRegister(std::size_t phys) const noexcept;
+    void writePhysicalRegister(std::size_t phys, std::uint64_t value) noexcept;
 
 private:
     struct RegisterState {
-        std::uint64_t value = 0;
         std::size_t phys = 0;
         std::size_t committed_phys = 0;
         std::optional<std::size_t> producer;
@@ -49,6 +50,7 @@ private:
     std::array<RegisterState, 32> registers_{};
     std::vector<std::size_t> free_phys_regs_;
     std::size_t physical_register_count_ = 0;
+    std::vector<std::uint64_t> physical_regs_;
     std::vector<RobEntry> rob_;
     std::size_t commit_head_ = 0;
     std::size_t committed_ = 0;
