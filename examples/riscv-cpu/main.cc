@@ -160,27 +160,19 @@ int main(int argc, char** argv) {
         sram, inst_pool, fetch_width);
     auto& fetch_decode_fifo = sim.createComponent<riscv_cpu::FetchDecodeFifo>(
         fifo_capacity, fetch_width, decode_width);
-    auto& decode = sim.createComponent<riscv_cpu::DecodeStage>();
-    auto& rename = sim.createComponent<riscv_cpu::RenameStage>(core, rename_width);
-    auto& issue = sim.createComponent<riscv_cpu::IssueStage>(
-        core, issue_capacity, rename_width, issue_width);
+    auto& backend = sim.createComponent<riscv_cpu::BackendStage>(
+        core, sram, rename_width, issue_capacity, rename_width, issue_width,
+        commit_width, trace ? &std::cerr : nullptr, trace_limit);
     auto& execute = sim.createComponent<riscv_cpu::ExecuteStage>(sram);
-    auto& commit = sim.createComponent<riscv_cpu::CommitStage>(
-        core, sram, commit_width, trace ? &std::cerr : nullptr, trace_limit);
 
     sim.connect(fetch.out, fetch_decode_fifo.in);
-    sim.connect(fetch_decode_fifo.out, decode.in);
-    sim.connect(decode.out, rename.in);
-    sim.connect(rename.out, issue.rename_in, commit.dispatch_in);
-    sim.connect(issue.issue_out, execute.issue_in);
-    sim.connect(execute.completion_out, issue.completion_in, commit.completion_in);
-    sim.connect(commit.redirect_out, fetch.redirect_in, decode.redirect_in,
-                fetch_decode_fifo.redirect_in, rename.redirect_in, issue.redirect_in,
+    sim.connect(fetch_decode_fifo.out, backend.in);
+    sim.connect(backend.issue_out, execute.issue_in);
+    sim.connect(execute.completion_out, backend.completion_in);
+    sim.connect(backend.redirect_out, fetch.redirect_in, fetch_decode_fifo.redirect_in,
                 execute.redirect_in);
     sim.connect(fetch_decode_fifo.can_accept, fetch.fifo_can_accept);
-    sim.connect(decode.can_accept, fetch_decode_fifo.decode_can_accept);
-    sim.connect(issue.can_accept, rename.issue_can_accept);
-    sim.connect(rename.can_accept, decode.rename_can_accept);
+    sim.connect(backend.can_accept, fetch_decode_fifo.backend_can_accept);
 
     if (load_balance) {
         sim.enableLoadBalancing(5);
@@ -192,7 +184,7 @@ int main(int argc, char** argv) {
     for (; ticks < tick_limit; ++ticks) {
         sim.tick();
         completed = fetch.architecturalHalted() && core.inFlightCount() == 0 &&
-                    fetch.redirectCount() == commit.redirectCount();
+                    fetch.stats.redirects == backend.stats.redirects;
         if (completed) {
             break;
         }
@@ -230,7 +222,7 @@ int main(int argc, char** argv) {
               << ", commit_width=" << commit_width
               << ", load_balance=" << (load_balance ? "on" : "off")
               << ", ticks=" << (ticks + 1)
-              << ", fetched=" << fetch.fetchedCount()
+              << ", fetched=" << fetch.stats.fetched
               << ", committed=" << core.committedCount()
               << ", ipc=" << static_cast<double>(core.committedCount()) /
                                static_cast<double>(ticks + 1)
@@ -238,25 +230,28 @@ int main(int argc, char** argv) {
               << ", committed_per_sec="
               << (static_cast<double>(core.committedCount()) / elapsed.count())
               << ", worker_idle=" << (sim.workerIdleRatio() * 100.0) << "%\n";
-    std::cout << "fetch=" << fetch.fetchedCount()
-              << ", decode=" << decode.decodedCount()
-              << ", rename=" << rename.renamedCount()
-              << ", issue_accept=" << issue.acceptedCount()
-              << ", issue=" << issue.issuedCount()
-              << ", execute_accept=" << execute.acceptedCount()
-              << ", execute_complete=" << execute.completedCount()
-              << ", commit=" << commit.retiredCount()
-              << ", commit_redirects=" << commit.redirectCount()
-              << ", fetch_decode_fifo_max=" << fetch_decode_fifo.maxOccupancy()
-              << ", fetch_decode_fifo_stalls=" << fetch_decode_fifo.overflowStalls()
-              << ", issue_output_stalls=" << issue.outputStalls() << '\n';
-    std::cout << "fetch_backpressure_stalls=" << fetch.backpressureStalls()
-              << ", fetch_control_stalls=" << fetch.controlStalls()
-              << ", redirects=" << fetch.redirectCount()
-              << ", decode_backpressure_stalls=" << decode.backpressureStalls()
-              << ", rename_resource_stalls=" << rename.resourceStalls()
+    std::cout << "fetch=" << fetch.stats.fetched
+              << ", decode=" << backend.stats.decoded
+              << ", rename=" << backend.stats.renamed
+              << ", issue_accept=" << backend.stats.accepted
+              << ", issue=" << backend.stats.issued
+              << ", execute_accept=" << execute.stats.accepted
+              << ", execute_complete=" << execute.stats.completed
+              << ", commit=" << backend.stats.retired
+              << ", commit_redirects=" << backend.stats.redirects
+              << ", fetch_decode_fifo_max=" << fetch_decode_fifo.stats.max_occupancy
+              << ", fetch_decode_fifo_stalls="
+              << fetch_decode_fifo.stats.overflow_stalls
+              << ", issue_output_stalls=" << backend.stats.output_stalls << '\n';
+    std::cout << "fetch_backpressure_stalls="
+              << fetch.stats.backpressure_stalls
+              << ", fetch_control_stalls=" << fetch.stats.control_stalls
+              << ", redirects=" << fetch.stats.redirects
+              << ", decode_backpressure_stalls="
+              << backend.stats.decode_backpressure_stalls
+              << ", rename_resource_stalls=" << backend.stats.resource_stalls
               << ", rename_issue_backpressure_stalls="
-              << rename.issueBackpressureStalls()
+              << backend.stats.issue_backpressure_stalls
               << ", free_physical_registers=" << core.freePhysicalRegisters() << '\n';
     std::cout << "x1=" << core.registerValue(1)
               << ", x5=" << core.registerValue(5)

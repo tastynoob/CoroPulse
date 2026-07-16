@@ -44,23 +44,15 @@ coropulse::Task<void> ExecuteStage::process() {
                     inst->executeState().done_tick,
                 });
             }
-            accepted_ += issued->size();
+            stats.accepted += issued->size();
         }
     }
     co_return;
 }
 
-std::size_t ExecuteStage::acceptedCount() const {
-    return accepted_;
-}
-
-std::size_t ExecuteStage::completedCount() const {
-    return completed_;
-}
-
 void ExecuteStage::publishCompletion() {
     if (!pending_completion_.empty() && completion_out.write(pending_completion_)) {
-        completed_ += pending_completion_.size();
+        stats.completed += pending_completion_.size();
         pending_completion_.clear();
     }
 }

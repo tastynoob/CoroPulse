@@ -29,7 +29,7 @@ coropulse::Task<void> FetchStage::process() {
         }
         if (!fifo_ready || !out.canWrite()) {
             if (pc_ / 4 < sram_.instructionCount()) {
-                ++backpressure_stalls_;
+                ++stats.backpressure_stalls;
             }
             continue;
         }
@@ -42,7 +42,7 @@ coropulse::Task<void> FetchStage::process() {
             bundle.push_back(inst_pool_.create(sram_.loadInstruction(fetch_pc), fetch_pc,
                                                predicted_next_pc));
             pc_ = predicted_next_pc;
-            ++fetched_;
+            ++stats.fetched;
         }
 
         if (!bundle.empty()) {
@@ -54,22 +54,6 @@ coropulse::Task<void> FetchStage::process() {
     co_return;
 }
 
-std::size_t FetchStage::fetchedCount() const {
-    return fetched_;
-}
-
-std::size_t FetchStage::backpressureStalls() const {
-    return backpressure_stalls_;
-}
-
-std::size_t FetchStage::controlStalls() const {
-    return control_stalls_;
-}
-
-std::size_t FetchStage::redirectCount() const {
-    return redirects_;
-}
-
 bool FetchStage::halted() const noexcept {
     return halted_;
 }
@@ -79,7 +63,7 @@ bool FetchStage::architecturalHalted() const noexcept {
 }
 
 void FetchStage::applyRedirect(const ControlRedirect& redirect) {
-    ++redirects_;
+    ++stats.redirects;
     pc_ = redirect.next_pc;
     halted_ = redirect.halt;
     architectural_halted_ = redirect.halt;
@@ -109,16 +93,16 @@ coropulse::Task<void> FetchDecodeFifo::process() {
             continue;
         }
 
-        const bool decode_ready = co_await decode_can_accept.read();
+        const bool backend_ready = co_await backend_can_accept.read();
 
-        if (decode_ready && !queue_.empty() && out.canWrite()) {
+        if (backend_ready && !queue_.empty() && out.canWrite()) {
             (void)out.write(popDecodeBundle());
         }
 
         const bool input_ready = canAcceptFetch();
         can_accept.set(input_ready);
         if (!input_ready && in.hasValue()) {
-            ++overflow_stalls_;
+            ++stats.overflow_stalls;
         }
 
         if (input_ready) {
@@ -126,21 +110,13 @@ coropulse::Task<void> FetchDecodeFifo::process() {
                 for (auto* inst : *fetched) {
                     queue_.push_back(inst);
                 }
-                if (queue_.size() > max_occupancy_) {
-                    max_occupancy_ = queue_.size();
+                if (queue_.size() > stats.max_occupancy) {
+                    stats.max_occupancy = queue_.size();
                 }
             }
         }
     }
     co_return;
-}
-
-std::size_t FetchDecodeFifo::maxOccupancy() const {
-    return max_occupancy_;
-}
-
-std::size_t FetchDecodeFifo::overflowStalls() const {
-    return overflow_stalls_;
 }
 
 bool FetchDecodeFifo::canAcceptFetch() const {
