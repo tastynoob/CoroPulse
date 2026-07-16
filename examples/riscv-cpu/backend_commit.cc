@@ -2,6 +2,7 @@
 
 #include <iomanip>
 #include <ostream>
+#include <utility>
 
 namespace riscv_cpu {
 
@@ -39,6 +40,33 @@ bool CommitPipe::publishPendingRedirect(coropulse::Output<ControlRedirect>& outp
 
     flush_next_tick_ = true;
     return false;
+}
+
+bool CommitPipe::publishPredictorUpdates(
+    coropulse::Output<BranchUpdateBundle>& output) {
+    if (pending_updates_.empty()) {
+        return true;
+    }
+
+    if (!output.write(pending_updates_)) {
+        return false;
+    }
+
+    pending_updates_.clear();
+    return true;
+}
+
+void CommitPipe::queuePredictorUpdates(BranchUpdateBundle&& updates) {
+    if (updates.empty()) {
+        return;
+    }
+
+    if (pending_updates_.empty()) {
+        pending_updates_ = std::move(updates);
+        return;
+    }
+
+    pending_updates_.insert(pending_updates_.end(), updates.begin(), updates.end());
 }
 
 RetireResult CommitPipe::retire(coropulse::TickId tick, BackendStats& stats) {

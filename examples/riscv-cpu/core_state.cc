@@ -151,6 +151,9 @@ RetireResult CoreState::retire(std::size_t max_count) {
         if (execute.store) {
             result.stores.push_back(*execute.store);
         }
+        if (execute.branch_update) {
+            result.branch_updates.push_back(*execute.branch_update);
+        }
         if (rename.writes_rd) {
             auto& reg = registers_[static_cast<std::size_t>(inst.rd)];
             free_phys_regs_.push_back(reg.committed_phys);

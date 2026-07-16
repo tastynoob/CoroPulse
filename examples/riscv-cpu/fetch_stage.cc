@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <utility>
 
 namespace riscv_cpu {
 
@@ -9,7 +10,8 @@ FetchStage::FetchStage(const SimpleSram& sram, DynInstPool& inst_pool,
                        std::size_t fetch_width)
     : sram_(sram),
       inst_pool_(inst_pool),
-      fetch_width_(fetch_width) {
+      fetch_width_(fetch_width),
+      predictor_(stats.predictor) {
     if (fetch_width_ == 0) {
         throw std::runtime_error("fetch width must be greater than zero");
     }
@@ -17,38 +19,25 @@ FetchStage::FetchStage(const SimpleSram& sram, DynInstPool& inst_pool,
 
 coropulse::Task<void> FetchStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
+        applyPredictorUpdates();
+
         bool fifo_ready = true;
         if (auto redirect = redirect_in.read()) {
             applyRedirect(*redirect);
         } else {
-            fifo_ready = co_await fifo_can_accept.read();
+            fifo_ready = co_await backend_can_accept.read();
         }
 
-        if (halted_) {
-            continue;
-        }
-        if (!fifo_ready || !out.canWrite()) {
-            if (pc_ / 4 < sram_.instructionCount()) {
-                ++stats.backpressure_stalls;
+        (void)emitReadyPacket(fifo_ready);
+
+        if (!halted_ && canBuildPacket()) {
+            auto packet = buildPacket(pc_);
+            if (packet.slots.empty()) {
+                halted_ = true;
+            } else {
+                pc_ = packet.micro_next_pc;
+                pipe_.push_back(std::move(packet));
             }
-            continue;
-        }
-
-        InstBundle bundle;
-        bundle.reserve(fetch_width_);
-        while (bundle.size() < fetch_width_ && pc_ / 4 < sram_.instructionCount()) {
-            const auto fetch_pc = pc_;
-            const auto predicted_next_pc = fetch_pc + 4;
-            bundle.push_back(inst_pool_.create(sram_.loadInstruction(fetch_pc), fetch_pc,
-                                               predicted_next_pc));
-            pc_ = predicted_next_pc;
-            ++stats.fetched;
-        }
-
-        if (!bundle.empty()) {
-            (void)out.write(std::move(bundle));
-        } else {
-            halted_ = true;
         }
     }
     co_return;
@@ -62,74 +51,144 @@ bool FetchStage::architecturalHalted() const noexcept {
     return architectural_halted_;
 }
 
+void FetchStage::applyPredictorUpdates() {
+    if (auto updates = predictor_update_in.take()) {
+        predictor_.update(*updates);
+    }
+}
+
 void FetchStage::applyRedirect(const ControlRedirect& redirect) {
     ++stats.redirects;
     pc_ = redirect.next_pc;
+    pipe_.clear();
     halted_ = redirect.halt;
     architectural_halted_ = redirect.halt;
 }
 
-FetchDecodeFifo::FetchDecodeFifo(std::size_t capacity, std::size_t fetch_width,
-                                 std::size_t decode_width)
-    : capacity_(capacity),
-      fetch_width_(fetch_width),
-      decode_width_(decode_width) {
-    if (capacity_ == 0) {
-        throw std::runtime_error("fetch-decode fifo capacity must be greater than zero");
+bool FetchStage::emitReadyPacket(bool fifo_ready) {
+    if (pipe_.empty()) {
+        return false;
     }
-    if (fetch_width_ == 0 || decode_width_ == 0) {
-        throw std::runtime_error("fetch/decode widths must be greater than zero");
+
+    auto& packet = pipe_.front();
+    if (currentTick() < packet.tage_ready_tick) {
+        return false;
     }
-    if (capacity_ < fetch_width_) {
-        throw std::runtime_error("fetch-decode fifo capacity must cover fetch width");
+
+    const bool corrected = finalizePrediction(packet);
+    if (corrected && !packet.correction_applied) {
+        while (pipe_.size() > 1) {
+            pipe_.pop_back();
+        }
+        pc_ = packet.final_next_pc;
+        packet.correction_applied = true;
+        ++stats.frontend_squashes;
     }
+
+    if (!fifo_ready || !out.canWrite()) {
+        if (!packet.slots.empty()) {
+            ++stats.backpressure_stalls;
+        }
+        return false;
+    }
+
+    auto bundle = makeInstBundle(packet);
+    if (!out.write(std::move(bundle))) {
+        ++stats.backpressure_stalls;
+        return false;
+    }
+
+    pipe_.pop_front();
+    return true;
 }
 
-coropulse::Task<void> FetchDecodeFifo::process() {
-    for (;; co_yield coropulse::tickDone{}) {
-        if (redirect_in.read()) {
-            queue_.clear();
-            (void)in.take();
-            continue;
-        }
+bool FetchStage::canBuildPacket() const {
+    return pipe_.size() < 3;
+}
 
-        const bool backend_ready = co_await backend_can_accept.read();
+FetchStage::FetchPacket FetchStage::buildPacket(std::uint64_t pc) {
+    FetchPacket packet;
+    packet.tage_ready_tick = currentTick() + 2;
 
-        if (backend_ready && !queue_.empty() && out.canWrite()) {
-            (void)out.write(popDecodeBundle());
-        }
-
-        const bool input_ready = canAcceptFetch();
-        can_accept.set(input_ready);
-        if (!input_ready && in.hasValue()) {
-            ++stats.overflow_stalls;
-        }
-
-        if (input_ready) {
-            if (auto fetched = in.take()) {
-                for (auto* inst : *fetched) {
-                    queue_.push_back(inst);
-                }
-                if (queue_.size() > stats.max_occupancy) {
-                    stats.max_occupancy = queue_.size();
-                }
-            }
-        }
+    if (pc / 4 >= sram_.instructionCount()) {
+        packet.micro_next_pc = pc;
+        packet.final_next_pc = pc;
+        return packet;
     }
-    co_return;
+
+    auto cursor = pc;
+    while (packet.slots.size() < fetch_width_ &&
+           cursor / 4 < sram_.instructionCount()) {
+        const auto& inst = sram_.loadInstruction(cursor);
+        FetchSlot slot;
+        slot.inst = &inst;
+        slot.pc = cursor;
+        slot.predicted_next_pc = cursor + 4;
+
+        packet.slots.push_back(slot);
+
+        if (isControlFlow(inst)) {
+            packet.has_control = true;
+            packet.control_index = packet.slots.size() - 1;
+            auto prediction = predictor_.predict(inst, cursor);
+            auto& control_slot = packet.slots.back();
+            control_slot.prediction = prediction;
+            control_slot.predicted_next_pc = prediction.valid
+                                                 ? prediction.predicted_next_pc
+                                                 : cursor + 4;
+            packet.micro_next_pc = control_slot.predicted_next_pc;
+            packet.final_next_pc = packet.micro_next_pc;
+            return packet;
+        }
+
+        cursor += 4;
+    }
+
+    packet.micro_next_pc = cursor;
+    packet.final_next_pc = cursor;
+    return packet;
 }
 
-bool FetchDecodeFifo::canAcceptFetch() const {
-    return capacity_ >= queue_.size() + fetch_width_;
+bool FetchStage::finalizePrediction(FetchPacket& packet) {
+    if (packet.finalized) {
+        return packet.final_next_pc != packet.micro_next_pc;
+    }
+
+    packet.finalized = true;
+    packet.final_next_pc = packet.micro_next_pc;
+    if (!packet.has_control) {
+        return false;
+    }
+
+    auto& slot = packet.slots[packet.control_index];
+    auto& prediction = slot.prediction;
+    if (!prediction.valid || !prediction.conditional || !prediction.tage.valid) {
+        return false;
+    }
+
+    const bool tage_taken = prediction.tage.prediction;
+    const auto tage_next_pc = tage_taken ? prediction.target_pc
+                                         : prediction.fallthrough_pc;
+    prediction.predicted_taken = tage_taken;
+    prediction.predicted_next_pc = tage_next_pc;
+    slot.predicted_next_pc = tage_next_pc;
+    packet.final_next_pc = tage_next_pc;
+
+    if (tage_next_pc != packet.micro_next_pc) {
+        ++stats.predictor.tage_overrides;
+        return true;
+    }
+    return false;
 }
 
-InstBundle FetchDecodeFifo::popDecodeBundle() {
+InstBundle FetchStage::makeInstBundle(const FetchPacket& packet) {
     InstBundle bundle;
-    const auto count = std::min(decode_width_, queue_.size());
-    bundle.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        bundle.push_back(queue_.front());
-        queue_.pop_front();
+    bundle.reserve(packet.slots.size());
+    for (const auto& slot : packet.slots) {
+        bundle.push_back(inst_pool_.create(*slot.inst, slot.pc,
+                                           slot.predicted_next_pc,
+                                           slot.prediction));
+        ++stats.fetched;
     }
     return bundle;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "backend_pipeline.hh"
+#include "branch_predictor.hh"
 #include "core_state.hh"
 #include "inst.hh"
 #include "memory.hh"
@@ -22,11 +23,14 @@ public:
         std::size_t backpressure_stalls = 0;
         std::size_t control_stalls = 0;
         std::size_t redirects = 0;
+        std::size_t frontend_squashes = 0;
+        BranchPredictor::Stats predictor;
     };
 
     coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
-    coropulse::SignalInput<bool> fifo_can_accept{"fetch_decode_fifo_can_accept"};
-    coropulse::Output<InstBundle> out{"fetch_to_fifo"};
+    coropulse::Input<BranchUpdateBundle> predictor_update_in{"predictor_update"};
+    coropulse::SignalInput<bool> backend_can_accept{"backend_can_accept"};
+    coropulse::Output<InstBundle> out{"fetch_to_backend"};
     Stats stats;
 
     FetchStage(const SimpleSram& sram, DynInstPool& inst_pool, std::size_t fetch_width);
@@ -36,54 +40,53 @@ public:
     bool architecturalHalted() const noexcept;
 
 private:
+    struct FetchSlot {
+        const StaticInst* inst = nullptr;
+        std::uint64_t pc = 0;
+        std::uint64_t predicted_next_pc = 0;
+        BranchPrediction prediction;
+    };
+
+    struct FetchPacket {
+        std::vector<FetchSlot> slots;
+        std::uint64_t micro_next_pc = 0;
+        std::uint64_t final_next_pc = 0;
+        bool has_control = false;
+        std::size_t control_index = 0;
+        coropulse::TickId tage_ready_tick = 0;
+        bool finalized = false;
+        bool correction_applied = false;
+    };
+
+    void applyPredictorUpdates();
     void applyRedirect(const ControlRedirect& redirect);
+    bool emitReadyPacket(bool fifo_ready);
+    bool canBuildPacket() const;
+    FetchPacket buildPacket(std::uint64_t pc);
+    bool finalizePrediction(FetchPacket& packet);
+    InstBundle makeInstBundle(const FetchPacket& packet);
 
     const SimpleSram& sram_;
     DynInstPool& inst_pool_;
     std::size_t fetch_width_;
+    BranchPredictor predictor_;
+    std::deque<FetchPacket> pipe_;
     std::uint64_t pc_ = 0;
     bool halted_ = false;
     bool architectural_halted_ = false;
 };
 
-class FetchDecodeFifo final : public coropulse::Component {
-public:
-    struct Stats {
-        std::size_t max_occupancy = 0;
-        std::size_t overflow_stalls = 0;
-    };
-
-    coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
-    coropulse::Input<InstBundle> in{"fetch_to_fifo"};
-    coropulse::SignalInput<bool> backend_can_accept{"backend_can_accept"};
-    coropulse::SignalOutput<bool> can_accept{"fetch_decode_fifo_can_accept"};
-    coropulse::Output<InstBundle> out{"fifo_to_backend"};
-    Stats stats;
-
-    FetchDecodeFifo(std::size_t capacity, std::size_t fetch_width,
-                    std::size_t decode_width);
-    coropulse::Task<void> process() override;
-
-private:
-    bool canAcceptFetch() const;
-    InstBundle popDecodeBundle();
-
-    std::size_t capacity_;
-    std::size_t fetch_width_;
-    std::size_t decode_width_;
-    std::deque<DynInstPtr> queue_;
-};
-
 class BackendStage final : public coropulse::Component {
 public:
-    coropulse::Input<InstBundle> in{"fifo_to_backend"};
-    coropulse::Input<ExecResultBundle> completion_in{"execute_to_backend"};
+    coropulse::Input<InstBundle> in{"fetch_to_backend"};
     coropulse::SignalOutput<bool> can_accept{"backend_can_accept"};
-    coropulse::Output<InstBundle> issue_out{"issue_to_execute"};
     coropulse::Output<ControlRedirect> redirect_out{"commit_redirect"};
+    coropulse::Output<BranchUpdateBundle> predictor_update_out{"predictor_update"};
     BackendStats stats;
 
     BackendStage(CoreState& core, SimpleSram& sram, std::size_t rename_width,
+                 std::size_t frontend_queue_capacity, std::size_t fetch_width,
+                 std::size_t decode_width,
                  std::size_t issue_capacity, std::size_t dispatch_width,
                  std::size_t issue_width, std::size_t commit_width,
                  std::ostream* trace_out = nullptr, std::size_t trace_limit = 0);
@@ -92,36 +95,6 @@ public:
 private:
     CoreState& core_;
     BackendPipeline backend_;
-};
-
-class ExecuteStage final : public coropulse::Component {
-public:
-    struct Stats {
-        std::size_t accepted = 0;
-        std::size_t completed = 0;
-    };
-
-    coropulse::Input<ControlRedirect> redirect_in{"commit_redirect"};
-    coropulse::Input<InstBundle> issue_in{"issue_to_execute"};
-    coropulse::Output<ExecResultBundle> completion_out{"execute_to_backend"};
-    Stats stats;
-
-    explicit ExecuteStage(SimpleSram& sram);
-    coropulse::Task<void> process() override;
-
-private:
-    struct Executing {
-        DynInstPtr inst = nullptr;
-        coropulse::TickId done_tick = 0;
-    };
-
-    void publishCompletion();
-    void completeReadyUops();
-    ExecResult execute(DynInstPtr inst);
-
-    SimpleSram& sram_;
-    std::vector<Executing> executing_;
-    ExecResultBundle pending_completion_;
 };
 
 } // namespace riscv_cpu

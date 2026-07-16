@@ -158,21 +158,15 @@ int main(int argc, char** argv) {
 
     auto& fetch = sim.createComponent<riscv_cpu::FetchStage>(
         sram, inst_pool, fetch_width);
-    auto& fetch_decode_fifo = sim.createComponent<riscv_cpu::FetchDecodeFifo>(
-        fifo_capacity, fetch_width, decode_width);
     auto& backend = sim.createComponent<riscv_cpu::BackendStage>(
-        core, sram, rename_width, issue_capacity, rename_width, issue_width,
-        commit_width, trace ? &std::cerr : nullptr, trace_limit);
-    auto& execute = sim.createComponent<riscv_cpu::ExecuteStage>(sram);
+        core, sram, rename_width, fifo_capacity, fetch_width, decode_width,
+        issue_capacity, rename_width, issue_width, commit_width,
+        trace ? &std::cerr : nullptr, trace_limit);
 
-    sim.connect(fetch.out, fetch_decode_fifo.in);
-    sim.connect(fetch_decode_fifo.out, backend.in);
-    sim.connect(backend.issue_out, execute.issue_in);
-    sim.connect(execute.completion_out, backend.completion_in);
-    sim.connect(backend.redirect_out, fetch.redirect_in, fetch_decode_fifo.redirect_in,
-                execute.redirect_in);
-    sim.connect(fetch_decode_fifo.can_accept, fetch.fifo_can_accept);
-    sim.connect(backend.can_accept, fetch_decode_fifo.backend_can_accept);
+    sim.connect(fetch.out, backend.in);
+    sim.connect(backend.predictor_update_out, fetch.predictor_update_in);
+    sim.connect(backend.redirect_out, fetch.redirect_in);
+    sim.connect(backend.can_accept, fetch.backend_can_accept);
 
     if (load_balance) {
         sim.enableLoadBalancing(5);
@@ -235,14 +229,14 @@ int main(int argc, char** argv) {
               << ", rename=" << backend.stats.renamed
               << ", issue_accept=" << backend.stats.accepted
               << ", issue=" << backend.stats.issued
-              << ", execute_accept=" << execute.stats.accepted
-              << ", execute_complete=" << execute.stats.completed
+              << ", execute_accept=" << backend.stats.execute_accepted
+              << ", execute_complete=" << backend.stats.execute_completed
               << ", commit=" << backend.stats.retired
               << ", commit_redirects=" << backend.stats.redirects
-              << ", fetch_decode_fifo_max=" << fetch_decode_fifo.stats.max_occupancy
+              << ", fetch_decode_fifo_max="
+              << backend.stats.frontend_queue_max_occupancy
               << ", fetch_decode_fifo_stalls="
-              << fetch_decode_fifo.stats.overflow_stalls
-              << ", issue_output_stalls=" << backend.stats.output_stalls << '\n';
+              << backend.stats.frontend_queue_stalls << '\n';
     std::cout << "fetch_backpressure_stalls="
               << fetch.stats.backpressure_stalls
               << ", fetch_control_stalls=" << fetch.stats.control_stalls
@@ -253,6 +247,59 @@ int main(int argc, char** argv) {
               << ", rename_issue_backpressure_stalls="
               << backend.stats.issue_backpressure_stalls
               << ", free_physical_registers=" << core.freePhysicalRegisters() << '\n';
+    const auto rate = [](std::size_t numerator, std::size_t denominator) {
+        if (denominator == 0) {
+            return 0.0;
+        }
+        return static_cast<double>(numerator) / static_cast<double>(denominator);
+    };
+    const auto& predictor = fetch.stats.predictor;
+    const auto bp_mispred_rate =
+        rate(predictor.mispredictions, predictor.updates);
+    const auto bp_direction_mispred_rate =
+        rate(predictor.direction_mispredictions, predictor.conditional_updates);
+    const auto bp_target_mispred_rate =
+        rate(predictor.target_mispredictions, predictor.updates);
+    const auto micro_btb_hit_rate =
+        rate(predictor.micro_btb_hits, predictor.micro_btb_lookups);
+    const auto tage_provider_hit_rate =
+        rate(predictor.tage_provider_hits, predictor.tage_lookups);
+    const auto tage_override_rate =
+        rate(predictor.tage_overrides, predictor.tage_lookups);
+    std::cout << "bp_predictions=" << predictor.predictions
+              << ", bp_conditional_predictions="
+              << predictor.conditional_predictions
+              << ", bp_updates=" << predictor.updates
+              << ", bp_conditional_updates=" << predictor.conditional_updates
+              << ", bp_taken_updates=" << predictor.taken_updates
+              << ", bp_mispredictions=" << predictor.mispredictions
+              << ", bp_mispred_rate=" << (bp_mispred_rate * 100.0) << "%"
+              << ", bp_direction_mispredictions="
+              << predictor.direction_mispredictions
+              << ", bp_direction_mispred_rate="
+              << (bp_direction_mispred_rate * 100.0) << "%"
+              << ", bp_target_mispredictions="
+              << predictor.target_mispredictions
+              << ", bp_target_mispred_rate="
+              << (bp_target_mispred_rate * 100.0) << "%\n";
+    std::cout << "micro_btb_lookups=" << predictor.micro_btb_lookups
+              << ", micro_btb_hits=" << predictor.micro_btb_hits
+              << ", micro_btb_hit_rate="
+              << (micro_btb_hit_rate * 100.0) << "%"
+              << ", micro_btb_updates=" << predictor.micro_btb_updates
+              << ", micro_btb_allocations="
+              << predictor.micro_btb_allocations
+              << ", tage_lookups=" << predictor.tage_lookups
+              << ", tage_provider_hits=" << predictor.tage_provider_hits
+              << ", tage_provider_hit_rate="
+              << (tage_provider_hit_rate * 100.0) << "%"
+              << ", tage_base_uses=" << predictor.tage_base_uses
+              << ", tage_alternate_uses=" << predictor.tage_alternate_uses
+              << ", tage_overrides=" << predictor.tage_overrides
+              << ", tage_override_rate=" << (tage_override_rate * 100.0) << "%"
+              << ", tage_allocations=" << predictor.tage_allocations
+              << ", tage_useful_ages=" << predictor.tage_useful_ages
+              << ", frontend_squashes=" << fetch.stats.frontend_squashes << '\n';
     std::cout << "x1=" << core.registerValue(1)
               << ", x5=" << core.registerValue(5)
               << ", x6=" << core.registerValue(6)

@@ -1,6 +1,7 @@
-#include "stages.hh"
+#include "backend_pipeline.hh"
 
 #include <cstdint>
+#include <optional>
 
 namespace riscv_cpu {
 namespace {
@@ -21,50 +22,46 @@ std::uint64_t branchTarget(std::uint64_t pc, std::int64_t imm) {
 
 } // namespace
 
-ExecuteStage::ExecuteStage(SimpleSram& sram) : sram_(sram) {}
+ExecutePipe::ExecutePipe(SimpleSram& sram) : sram_(sram) {}
 
-coropulse::Task<void> ExecuteStage::process() {
-    for (;; co_yield coropulse::tickDone{}) {
-        if (redirect_in.read()) {
-            executing_.clear();
-            pending_completion_.clear();
-            (void)issue_in.take();
-            continue;
-        }
-
-        publishCompletion();
-        completeReadyUops();
-        publishCompletion();
-
-        if (auto issued = issue_in.take()) {
-            for (auto* inst : *issued) {
-                inst->executeState().done_tick = currentTick() + inst->staticInst().latency;
-                executing_.push_back(Executing{
-                    inst,
-                    inst->executeState().done_tick,
-                });
-            }
-            stats.accepted += issued->size();
-        }
+void ExecutePipe::accept(InstBundle&& bundle, coropulse::TickId tick,
+                         BackendStats& stats) {
+    for (auto* inst : bundle) {
+        inst->executeState().done_tick = tick + inst->staticInst().latency;
+        executing_.push_back(Executing{
+            inst,
+            inst->executeState().done_tick,
+        });
     }
-    co_return;
+    stats.execute_accepted += bundle.size();
 }
 
-void ExecuteStage::publishCompletion() {
-    if (!pending_completion_.empty() && completion_out.write(pending_completion_)) {
-        stats.completed += pending_completion_.size();
+ExecResultBundle ExecutePipe::collectCompletions(coropulse::TickId tick,
+                                                 BackendStats& stats) {
+    ExecResultBundle completed;
+    if (!pending_completion_.empty()) {
+        completed = std::move(pending_completion_);
         pending_completion_.clear();
+        stats.execute_completed += completed.size();
     }
+
+    completeReadyUops(tick);
+    return completed;
 }
 
-void ExecuteStage::completeReadyUops() {
+void ExecutePipe::clear() {
+    executing_.clear();
+    pending_completion_.clear();
+}
+
+void ExecutePipe::completeReadyUops(coropulse::TickId tick) {
     if (!pending_completion_.empty()) {
         return;
     }
 
     for (auto iter = executing_.begin(); iter != executing_.end();) {
-        if (iter->done_tick <= currentTick()) {
-            pending_completion_.push_back(execute(iter->inst));
+        if (iter->done_tick <= tick) {
+            pending_completion_.push_back(execute(iter->inst, tick));
             executing_.erase(iter);
         } else {
             ++iter;
@@ -72,8 +69,8 @@ void ExecuteStage::completeReadyUops() {
     }
 }
 
-ExecResult ExecuteStage::execute(DynInstPtr inst) {
-    sram_.setTimerValue(currentTick());
+ExecResult ExecutePipe::execute(DynInstPtr inst, coropulse::TickId tick) {
+    sram_.setTimerValue(tick);
 
     const auto& static_inst = inst->staticInst();
     const auto& rename = inst->renameState();
@@ -88,6 +85,23 @@ ExecResult ExecuteStage::execute(DynInstPtr inst) {
     result.writes_rd = rename.writes_rd;
     auto& execute = inst->executeState();
 
+    std::optional<BranchUpdate> branch_update;
+    const auto recordBranch = [&](bool conditional, bool taken,
+                                  std::uint64_t target,
+                                  std::uint64_t actual_next_pc) {
+        BranchUpdate update;
+        update.valid = true;
+        update.conditional = conditional;
+        update.taken = taken;
+        update.pc = inst->pc();
+        update.target_pc = target;
+        update.actual_next_pc = actual_next_pc;
+        update.predicted_next_pc = inst->predictedNextPc();
+        update.mispredicted = actual_next_pc != inst->predictedNextPc();
+        update.prediction = inst->branchPrediction();
+        branch_update = update;
+    };
+
     switch (static_inst.opcode) {
     case Opcode::lui:
         result.value = static_cast<std::uint64_t>(static_inst.imm);
@@ -97,45 +111,56 @@ ExecResult ExecuteStage::execute(DynInstPtr inst) {
         break;
     case Opcode::jal:
         result.value = inst->pc() + 4;
-        execute.redirect = ControlRedirect{branchTarget(inst->pc(), static_inst.imm), false};
+        recordBranch(false, true, branchTarget(inst->pc(), static_inst.imm),
+                     branchTarget(inst->pc(), static_inst.imm));
+        execute.redirect = ControlRedirect{branch_update->actual_next_pc, false};
         break;
     case Opcode::jalr:
         result.value = inst->pc() + 4;
-        execute.redirect =
-            ControlRedirect{addSignedImmediate(src1, static_inst.imm) & ~std::uint64_t{1},
-                            false};
+        recordBranch(false, true,
+                     addSignedImmediate(src1, static_inst.imm) & ~std::uint64_t{1},
+                     addSignedImmediate(src1, static_inst.imm) & ~std::uint64_t{1});
+        execute.redirect = ControlRedirect{branch_update->actual_next_pc, false};
         break;
     case Opcode::beq:
-        execute.redirect = ControlRedirect{
-            src1 == src2 ? branchTarget(inst->pc(), static_inst.imm) : inst->pc() + 4,
-            false};
+        recordBranch(true, src1 == src2, branchTarget(inst->pc(), static_inst.imm),
+                     src1 == src2 ? branchTarget(inst->pc(), static_inst.imm)
+                                  : inst->pc() + 4);
+        execute.redirect = ControlRedirect{branch_update->actual_next_pc, false};
         break;
     case Opcode::bne:
-        execute.redirect = ControlRedirect{
-            src1 != src2 ? branchTarget(inst->pc(), static_inst.imm) : inst->pc() + 4,
-            false};
+        recordBranch(true, src1 != src2, branchTarget(inst->pc(), static_inst.imm),
+                     src1 != src2 ? branchTarget(inst->pc(), static_inst.imm)
+                                  : inst->pc() + 4);
+        execute.redirect = ControlRedirect{branch_update->actual_next_pc, false};
         break;
     case Opcode::blt:
-        execute.redirect = ControlRedirect{
-            signed_src1 < signed_src2 ? branchTarget(inst->pc(), static_inst.imm)
-                                      : inst->pc() + 4,
-            false};
+        recordBranch(true, signed_src1 < signed_src2,
+                     branchTarget(inst->pc(), static_inst.imm),
+                     signed_src1 < signed_src2
+                         ? branchTarget(inst->pc(), static_inst.imm)
+                         : inst->pc() + 4);
+        execute.redirect = ControlRedirect{branch_update->actual_next_pc, false};
         break;
     case Opcode::bge:
-        execute.redirect = ControlRedirect{
-            signed_src1 >= signed_src2 ? branchTarget(inst->pc(), static_inst.imm)
-                                       : inst->pc() + 4,
-            false};
+        recordBranch(true, signed_src1 >= signed_src2,
+                     branchTarget(inst->pc(), static_inst.imm),
+                     signed_src1 >= signed_src2
+                         ? branchTarget(inst->pc(), static_inst.imm)
+                         : inst->pc() + 4);
+        execute.redirect = ControlRedirect{branch_update->actual_next_pc, false};
         break;
     case Opcode::bltu:
-        execute.redirect = ControlRedirect{
-            src1 < src2 ? branchTarget(inst->pc(), static_inst.imm) : inst->pc() + 4,
-            false};
+        recordBranch(true, src1 < src2, branchTarget(inst->pc(), static_inst.imm),
+                     src1 < src2 ? branchTarget(inst->pc(), static_inst.imm)
+                                 : inst->pc() + 4);
+        execute.redirect = ControlRedirect{branch_update->actual_next_pc, false};
         break;
     case Opcode::bgeu:
-        execute.redirect = ControlRedirect{
-            src1 >= src2 ? branchTarget(inst->pc(), static_inst.imm) : inst->pc() + 4,
-            false};
+        recordBranch(true, src1 >= src2, branchTarget(inst->pc(), static_inst.imm),
+                     src1 >= src2 ? branchTarget(inst->pc(), static_inst.imm)
+                                  : inst->pc() + 4);
+        execute.redirect = ControlRedirect{branch_update->actual_next_pc, false};
         break;
     case Opcode::lb:
         result.value = sram_.load(addSignedImmediate(src1, static_inst.imm), 1, true);
@@ -270,6 +295,10 @@ ExecResult ExecuteStage::execute(DynInstPtr inst) {
         break;
     case Opcode::illegal:
         break;
+    }
+
+    if (branch_update) {
+        execute.branch_update = branch_update;
     }
 
     if (execute.redirect && !execute.redirect->halt &&

@@ -43,10 +43,10 @@ void IssuePipe::acceptRenamed(const InstBundle& bundle, BackendStats& stats) {
     stats.accepted += bundle.size();
 }
 
-void IssuePipe::issue(coropulse::Output<InstBundle>& output, BackendStats& stats) {
+InstBundle IssuePipe::issue(BackendStats& stats) {
     const auto ready = findReadyBundle();
     if (ready.empty()) {
-        return;
+        return {};
     }
 
     InstBundle bundle;
@@ -59,14 +59,11 @@ void IssuePipe::issue(coropulse::Output<InstBundle>& output, BackendStats& stats
         bundle.push_back(entry.inst);
     }
 
-    if (output.write(std::move(bundle))) {
-        for (auto iter = ready.rbegin(); iter != ready.rend(); ++iter) {
-            queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(*iter));
-        }
-        stats.issued += ready.size();
-    } else {
-        ++stats.output_stalls;
+    for (auto iter = ready.rbegin(); iter != ready.rend(); ++iter) {
+        queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(*iter));
     }
+    stats.issued += ready.size();
+    return bundle;
 }
 
 void IssuePipe::clear() {

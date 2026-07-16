@@ -6,6 +6,9 @@ namespace riscv_cpu {
 
 BackendStage::BackendStage(CoreState& core, SimpleSram& sram,
                            std::size_t rename_width,
+                           std::size_t frontend_queue_capacity,
+                           std::size_t fetch_width,
+                           std::size_t decode_width,
                            std::size_t issue_capacity,
                            std::size_t dispatch_width,
                            std::size_t issue_width,
@@ -13,8 +16,9 @@ BackendStage::BackendStage(CoreState& core, SimpleSram& sram,
                            std::ostream* trace_out,
                            std::size_t trace_limit)
     : core_(core),
-      backend_(core, sram, rename_width, issue_capacity, dispatch_width,
-               issue_width, commit_width, trace_out, trace_limit) {}
+      backend_(core, sram, rename_width, frontend_queue_capacity, fetch_width,
+               decode_width, issue_capacity, dispatch_width, issue_width,
+               commit_width, trace_out, trace_limit) {}
 
 coropulse::Task<void> BackendStage::process() {
     for (;; co_yield coropulse::tickDone{}) {
@@ -22,10 +26,8 @@ coropulse::Task<void> BackendStage::process() {
         const bool decode_slot_open = backend_.decode.slotOpen();
         const bool rename_slot_open = backend_.rename.slotOpen();
 
-        auto completion = completion_in.read();
-        const auto* dispatch = backend_.rename.readCommitDispatch();
-
         if (backend_.commit.hasPendingRedirect()) {
+            const auto* dispatch = backend_.rename.readCommitDispatch();
             if (!backend_.commit.publishPendingRedirect(redirect_out, stats)) {
                 backend_.commit.discard(dispatch);
                 can_accept.set(false);
@@ -35,16 +37,28 @@ coropulse::Task<void> BackendStage::process() {
         }
 
         if (flushing) {
+            const auto* dispatch = backend_.rename.readCommitDispatch();
             backend_.flushAfterRedirect(dispatch, in);
             continue;
         }
 
-        if (completion) {
-            backend_.issue.rememberCompletions(*completion);
-            backend_.commit.markCompleted(*completion);
+        if (!backend_.commit.publishPredictorUpdates(predictor_update_out)) {
+            can_accept.set(false);
+            backend_.rename.clearIfConsumed();
+            continue;
         }
 
-        const auto result = backend_.commit.retire(currentTick(), stats);
+        const auto completion = backend_.execute.collectCompletions(currentTick(), stats);
+        const auto* dispatch = backend_.rename.readCommitDispatch();
+
+        if (!completion.empty()) {
+            backend_.issue.rememberCompletions(completion);
+            backend_.commit.markCompleted(completion);
+        }
+
+        auto result = backend_.commit.retire(currentTick(), stats);
+        backend_.commit.queuePredictorUpdates(std::move(result.branch_updates));
+        (void)backend_.commit.publishPredictorUpdates(predictor_update_out);
         if (result.redirect) {
             backend_.commit.discard(dispatch);
             (void)backend_.commit.publishPendingRedirect(redirect_out, stats);
@@ -57,7 +71,10 @@ coropulse::Task<void> BackendStage::process() {
             backend_.commit.dispatch(*dispatch);
         }
 
-        backend_.issue.issue(issue_out, stats);
+        auto issued = backend_.issue.issue(stats);
+        if (!issued.empty()) {
+            backend_.execute.accept(std::move(issued), currentTick(), stats);
+        }
 
         const bool issue_ready = backend_.issue.canAcceptDispatch();
         if (issue_ready && backend_.rename.hasIssueBundle()) {
@@ -70,7 +87,6 @@ coropulse::Task<void> BackendStage::process() {
             core_.freePhysicalRegisters() >= backend_.renameWidth();
         const bool rename_ready = issue_ready && resource_ready && rename_slot_open;
         const bool decode_ready = rename_ready && decode_slot_open;
-        can_accept.set(decode_ready);
 
         if (!issue_ready && backend_.decode.hasBundle()) {
             ++stats.issue_backpressure_stalls;
@@ -83,12 +99,23 @@ coropulse::Task<void> BackendStage::process() {
             backend_.rename.accept(core_, backend_.decode.takeBundle(), stats);
         }
 
-        if (!decode_ready && in.hasValue()) {
+        if (!decode_ready && backend_.frontend_queue.hasDecodeBundle()) {
             ++stats.decode_backpressure_stalls;
         }
         if (decode_ready) {
+            if (backend_.frontend_queue.hasDecodeBundle()) {
+                backend_.decode.accept(backend_.frontend_queue.popDecodeBundle(), stats);
+            }
+        }
+
+        const bool frontend_ready = backend_.frontend_queue.canAcceptFetch();
+        can_accept.set(frontend_ready);
+        if (!frontend_ready && in.hasValue()) {
+            ++stats.frontend_queue_stalls;
+        }
+        if (frontend_ready) {
             if (auto fetched = in.take()) {
-                backend_.decode.accept(std::move(*fetched), stats);
+                backend_.frontend_queue.acceptFetch(std::move(*fetched), stats);
             }
         }
     }

@@ -3,10 +3,13 @@
 namespace riscv_cpu {
 
 DynInst::DynInst(const StaticInst& static_inst, std::uint64_t pc,
-                 std::uint64_t predicted_next_pc, std::uint64_t fetch_sequence)
+                 std::uint64_t predicted_next_pc,
+                 const BranchPrediction& branch_prediction,
+                 std::uint64_t fetch_sequence)
     : static_inst_(&static_inst),
       pc_(pc),
       predicted_next_pc_(predicted_next_pc),
+      branch_prediction_(branch_prediction),
       fetch_sequence_(fetch_sequence) {}
 
 const StaticInst& DynInst::staticInst() const noexcept {
@@ -23,6 +26,10 @@ std::uint64_t DynInst::predictedNextPc() const noexcept {
 
 std::uint64_t DynInst::fetchSequence() const noexcept {
     return fetch_sequence_;
+}
+
+const BranchPrediction& DynInst::branchPrediction() const noexcept {
+    return branch_prediction_;
 }
 
 RenameState& DynInst::renameState() noexcept {
@@ -50,8 +57,10 @@ const CommitState& DynInst::commitState() const noexcept {
 }
 
 DynInstPtr DynInstPool::create(const StaticInst& static_inst, std::uint64_t pc,
-                               std::uint64_t predicted_next_pc) {
-    insts_.emplace_back(static_inst, pc, predicted_next_pc, next_fetch_sequence_++);
+                               std::uint64_t predicted_next_pc,
+                               const BranchPrediction& branch_prediction) {
+    insts_.emplace_back(static_inst, pc, predicted_next_pc, branch_prediction,
+                        next_fetch_sequence_++);
     return &insts_.back();
 }
 
