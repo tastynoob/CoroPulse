@@ -19,6 +19,8 @@ public:
     std::uint64_t load(std::uint64_t address, std::size_t bytes,
                        bool sign_extend) const;
     void store(std::uint64_t address, std::uint64_t value, std::size_t bytes);
+    void validateLoad(std::uint64_t address, std::size_t bytes) const;
+    void validateStore(std::uint64_t address, std::size_t bytes) const;
     std::uint64_t load64(std::uint64_t address) const;
     void store64(std::uint64_t address, std::uint64_t value);
     void setTimerValue(std::uint64_t value);

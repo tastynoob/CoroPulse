@@ -4,6 +4,8 @@
 #include "inst.hh"
 #include "memory.hh"
 
+#include <utility>
+
 namespace riscv_cpu {
 
 ExecContext::ExecContext(CoreState& core, SimpleSram& sram, DynInst& inst,
@@ -48,6 +50,11 @@ std::uint64_t ExecContext::load(std::uint64_t address, std::size_t bytes,
     return sram_.load(address, bytes, sign_extend);
 }
 
+void ExecContext::validateStore(std::uint64_t address,
+                                std::size_t bytes) const {
+    sram_.validateStore(address, bytes);
+}
+
 void ExecContext::setStore(std::uint64_t address, std::uint64_t value,
                            std::size_t bytes) {
     inst_.executeState().store = StoreWrite{address, value, bytes};
@@ -55,6 +62,15 @@ void ExecContext::setStore(std::uint64_t address, std::uint64_t value,
 
 void ExecContext::setRedirect(ControlRedirect redirect) {
     inst_.executeState().redirect = redirect;
+}
+
+void ExecContext::setException(ExceptionCode code, std::uint64_t fault_address,
+                               std::string message) {
+    inst_.executeState().exception = ExceptionState{
+        code,
+        fault_address,
+        std::move(message),
+    };
 }
 
 void ExecContext::recordBranch(bool conditional, bool taken,

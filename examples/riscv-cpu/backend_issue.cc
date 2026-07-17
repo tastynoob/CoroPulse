@@ -20,8 +20,8 @@ IssuePipe::IssuePipe(CoreState& core, std::size_t capacity,
     }
 }
 
-bool IssuePipe::canAcceptDispatch() const {
-    return queue_.size() + dispatch_width_ <= capacity_;
+bool IssuePipe::canAccept(std::size_t count) const {
+    return queue_.size() + count <= capacity_;
 }
 
 void IssuePipe::rememberCompletions(const InstBundle& completions) {
@@ -31,7 +31,7 @@ void IssuePipe::rememberCompletions(const InstBundle& completions) {
 }
 
 void IssuePipe::acceptRenamed(const InstBundle& bundle, BackendStats& stats) {
-    if (!canAcceptDispatch()) {
+    if (!canAccept(bundle.size())) {
         throw std::runtime_error("issue pipe accepted a bundle while full");
     }
 
@@ -73,14 +73,7 @@ bool IssuePipe::operandsReady(const Entry& entry) const {
 }
 
 bool IssuePipe::canIssue(const Entry& entry) const {
-    if (!operandsReady(entry)) {
-        return false;
-    }
-    const auto& rename = entry.inst->renameState();
-    if (!rename.memory) {
-        return true;
-    }
-    return core_.memoryOrderReady(rename.sequence);
+    return operandsReady(entry);
 }
 
 std::vector<std::size_t> IssuePipe::findReadyBundle() const {

@@ -87,8 +87,10 @@ public:
     BackendStage(CoreState& core, SimpleSram& sram, std::size_t rename_width,
                  std::size_t frontend_queue_capacity, std::size_t fetch_width,
                  std::size_t decode_width,
-                 std::size_t issue_capacity, std::size_t dispatch_width,
-                 std::size_t issue_width, std::size_t commit_width,
+                 std::size_t issue_capacity, std::size_t load_queue_capacity,
+                 std::size_t store_queue_capacity, std::size_t dispatch_width,
+                 std::size_t issue_width, std::size_t memory_width,
+                 std::size_t commit_width,
                  std::ostream* trace_out = nullptr, std::size_t trace_limit = 0);
     coropulse::Task<void> process() override;
 

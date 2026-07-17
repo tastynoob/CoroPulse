@@ -13,6 +13,13 @@ bool DecodePipe::hasBundle() const noexcept {
     return reg_.has_value();
 }
 
+const InstBundle& DecodePipe::bundle() const {
+    if (!reg_) {
+        throw std::runtime_error("decode pipe has no bundle");
+    }
+    return *reg_;
+}
+
 InstBundle DecodePipe::takeBundle() {
     if (!reg_) {
         throw std::runtime_error("decode pipe has no bundle to take");

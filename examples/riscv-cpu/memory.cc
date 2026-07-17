@@ -113,6 +113,33 @@ void SimpleSram::store(std::uint64_t address, std::uint64_t value, std::size_t b
     }
 }
 
+void SimpleSram::validateLoad(std::uint64_t address, std::size_t bytes) const {
+    std::lock_guard lock(mutex_);
+    if (!loadMmioLocked(address, bytes)) {
+        checkAccess(address, bytes);
+    }
+}
+
+void SimpleSram::validateStore(std::uint64_t address, std::size_t bytes) const {
+    std::lock_guard lock(mutex_);
+    if (address == kUartData && bytes <= 8) {
+        if (bytes != 1 && bytes != 2 && bytes != 4 && bytes != 8) {
+            throw std::runtime_error("mmio store has unsupported width");
+        }
+        return;
+    }
+    if (address >= kTimerBase && address + bytes <= kTimerBase + 8) {
+        if (bytes != 1 && bytes != 2 && bytes != 4 && bytes != 8) {
+            throw std::runtime_error("mmio store has unsupported width");
+        }
+        if (address % bytes != 0) {
+            throw std::runtime_error("mmio store is not aligned");
+        }
+        return;
+    }
+    checkAccess(address, bytes);
+}
+
 void SimpleSram::setTimerValue(std::uint64_t value) {
     std::lock_guard lock(mutex_);
     timer_value_ = value;

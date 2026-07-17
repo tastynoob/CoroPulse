@@ -3,6 +3,7 @@
 #include "exec_context.hh"
 #include "isa_execute.hh"
 
+#include <stdexcept>
 #include <utility>
 
 namespace riscv_cpu {
@@ -13,6 +14,9 @@ ExecutePipe::ExecutePipe(CoreState& core, SimpleSram& sram)
 void ExecutePipe::accept(InstBundle&& bundle, coropulse::TickId tick,
                          BackendStats& stats) {
     for (auto* inst : bundle) {
+        if (isMemory(inst->staticInst())) {
+            throw std::runtime_error("memory instruction entered execute pipe");
+        }
         inst->executeState().done_tick = tick + inst->staticInst().latency;
         executing_.push_back(Executing{
             inst,

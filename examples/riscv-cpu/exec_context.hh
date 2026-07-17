@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace riscv_cpu {
 
@@ -27,9 +28,12 @@ public:
 
     std::uint64_t load(std::uint64_t address, std::size_t bytes,
                        bool sign_extend) const;
+    void validateStore(std::uint64_t address, std::size_t bytes) const;
     void setStore(std::uint64_t address, std::uint64_t value,
                   std::size_t bytes);
     void setRedirect(ControlRedirect redirect);
+    void setException(ExceptionCode code, std::uint64_t fault_address,
+                      std::string message);
     void recordBranch(bool conditional, bool taken, std::uint64_t target,
                       std::uint64_t actual_next_pc);
     void suppressPredictedRedirect();

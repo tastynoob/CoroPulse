@@ -3,6 +3,7 @@
 #include "exec_context.hh"
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace riscv_cpu {
 namespace {
@@ -76,60 +77,6 @@ void executeBranch(ExecContext& context, std::uint64_t src1,
     const auto target = branchTarget(context.pc(), static_inst.imm);
     context.recordBranch(true, taken, target,
                          taken ? target : context.pc() + 4);
-}
-
-void executeLoad(ExecContext& context, std::uint64_t src1) {
-    const auto& static_inst = context.staticInst();
-    const auto address = addSignedImmediate(src1, static_inst.imm);
-
-    switch (static_inst.opcode) {
-    case Opcode::lb:
-        context.writeResult(context.load(address, 1, true));
-        break;
-    case Opcode::lh:
-        context.writeResult(context.load(address, 2, true));
-        break;
-    case Opcode::lw:
-        context.writeResult(context.load(address, 4, true));
-        break;
-    case Opcode::ld:
-        context.writeResult(context.load(address, 8, false));
-        break;
-    case Opcode::lbu:
-        context.writeResult(context.load(address, 1, false));
-        break;
-    case Opcode::lhu:
-        context.writeResult(context.load(address, 2, false));
-        break;
-    case Opcode::lwu:
-        context.writeResult(context.load(address, 4, false));
-        break;
-    default:
-        break;
-    }
-}
-
-void executeStore(ExecContext& context, std::uint64_t src1,
-                  std::uint64_t src2) {
-    const auto& static_inst = context.staticInst();
-    const auto address = addSignedImmediate(src1, static_inst.imm);
-
-    switch (static_inst.opcode) {
-    case Opcode::sb:
-        context.setStore(address, src2, 1);
-        break;
-    case Opcode::sh:
-        context.setStore(address, src2, 2);
-        break;
-    case Opcode::sw:
-        context.setStore(address, src2, 4);
-        break;
-    case Opcode::sd:
-        context.setStore(address, src2, 8);
-        break;
-    default:
-        break;
-    }
 }
 
 void executeIntegerImmediate(ExecContext& context, std::uint64_t src1) {
@@ -302,14 +249,11 @@ void executeInst(ExecContext& context) {
     case Opcode::lbu:
     case Opcode::lhu:
     case Opcode::lwu:
-        executeLoad(context, src1);
-        break;
     case Opcode::sb:
     case Opcode::sh:
     case Opcode::sw:
     case Opcode::sd:
-        executeStore(context, src1, src2);
-        break;
+        throw std::runtime_error("memory opcode entered integer execute");
     case Opcode::lui:
     case Opcode::auipc:
     case Opcode::addi:

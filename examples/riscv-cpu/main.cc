@@ -47,12 +47,16 @@ int main(int argc, char** argv) {
         }},
         {"core", {
             {"physical_registers", 64},
+            {"rob_capacity", 64},
             {"issue_capacity", 16},
+            {"load_queue_capacity", 16},
+            {"store_queue_capacity", 16},
             {"fetch_width", 4},
             {"fetch_decode_fifo_capacity", 16},
             {"decode_width", 4},
             {"rename_width", 4},
             {"issue_width", 4},
+            {"memory_width", 2},
             {"commit_width", 4},
         }},
         {"memory", {
@@ -70,8 +74,12 @@ int main(int argc, char** argv) {
     std::size_t fifo_capacity_override = 0;
     std::size_t decode_width_override = 0;
     std::size_t rename_width_override = 0;
+    std::size_t rob_capacity_override = 0;
     std::size_t issue_capacity_override = 0;
+    std::size_t load_queue_capacity_override = 0;
+    std::size_t store_queue_capacity_override = 0;
     std::size_t issue_width_override = 0;
+    std::size_t memory_width_override = 0;
     std::size_t commit_width_override = 0;
     for (int i = 1; i < argc; ++i) {
         const auto arg = std::string(argv[i]);
@@ -94,10 +102,20 @@ int main(int argc, char** argv) {
             decode_width_override = parseSizeOption(arg, "--decode-width=");
         } else if (arg.rfind("--rename-width=", 0) == 0) {
             rename_width_override = parseSizeOption(arg, "--rename-width=");
+        } else if (arg.rfind("--rob-capacity=", 0) == 0) {
+            rob_capacity_override = parseSizeOption(arg, "--rob-capacity=");
         } else if (arg.rfind("--issue-capacity=", 0) == 0) {
             issue_capacity_override = parseSizeOption(arg, "--issue-capacity=");
+        } else if (arg.rfind("--load-queue-capacity=", 0) == 0) {
+            load_queue_capacity_override =
+                parseSizeOption(arg, "--load-queue-capacity=");
+        } else if (arg.rfind("--store-queue-capacity=", 0) == 0) {
+            store_queue_capacity_override =
+                parseSizeOption(arg, "--store-queue-capacity=");
         } else if (arg.rfind("--issue-width=", 0) == 0) {
             issue_width_override = parseSizeOption(arg, "--issue-width=");
+        } else if (arg.rfind("--memory-width=", 0) == 0) {
+            memory_width_override = parseSizeOption(arg, "--memory-width=");
         } else if (arg.rfind("--commit-width=", 0) == 0) {
             commit_width_override = parseSizeOption(arg, "--commit-width=");
         } else if (raw_path.empty()) {
@@ -125,7 +143,13 @@ int main(int argc, char** argv) {
     riscv_cpu::SimpleSram sram(
         std::move(raw_image), params["memory"]["data_bytes"].as<std::size_t>());
 
-    riscv_cpu::CoreState core(params["core"]["physical_registers"].as<std::size_t>());
+    const auto rob_capacity =
+        rob_capacity_override != 0
+            ? rob_capacity_override
+            : params["core"]["rob_capacity"].as<std::size_t>();
+    riscv_cpu::CoreState core(
+        params["core"]["physical_registers"].as<std::size_t>(),
+        rob_capacity);
     riscv_cpu::DynInstPool inst_pool;
     const auto workers = workers_override != 0
                              ? workers_override
@@ -136,6 +160,14 @@ int main(int argc, char** argv) {
         issue_capacity_override != 0
             ? issue_capacity_override
             : params["core"]["issue_capacity"].as<std::size_t>();
+    const auto load_queue_capacity =
+        load_queue_capacity_override != 0
+            ? load_queue_capacity_override
+            : params["core"]["load_queue_capacity"].as<std::size_t>();
+    const auto store_queue_capacity =
+        store_queue_capacity_override != 0
+            ? store_queue_capacity_override
+            : params["core"]["store_queue_capacity"].as<std::size_t>();
     const auto fetch_width =
         fetch_width_override != 0 ? fetch_width_override
                                   : params["core"]["fetch_width"].as<std::size_t>();
@@ -152,6 +184,9 @@ int main(int argc, char** argv) {
     const auto issue_width =
         issue_width_override != 0 ? issue_width_override
                                   : params["core"]["issue_width"].as<std::size_t>();
+    const auto memory_width =
+        memory_width_override != 0 ? memory_width_override
+                                   : params["core"]["memory_width"].as<std::size_t>();
     const auto commit_width =
         commit_width_override != 0 ? commit_width_override
                                    : params["core"]["commit_width"].as<std::size_t>();
@@ -160,7 +195,8 @@ int main(int argc, char** argv) {
         sram, inst_pool, fetch_width);
     auto& backend = sim.createComponent<riscv_cpu::BackendStage>(
         core, sram, rename_width, fifo_capacity, fetch_width, decode_width,
-        issue_capacity, rename_width, issue_width, commit_width,
+        issue_capacity, load_queue_capacity, store_queue_capacity, rename_width,
+        issue_width, memory_width, commit_width,
         trace ? &std::cerr : nullptr, trace_limit);
 
     sim.connect(fetch.out, backend.in);
@@ -207,12 +243,16 @@ int main(int argc, char** argv) {
               << ", workers=" << workers
               << ", instructions=" << instruction_count
               << ", physical_registers=" << core.physicalRegisterCount()
+              << ", rob_capacity=" << core.robCapacity()
               << ", issue_capacity=" << issue_capacity
+              << ", load_queue_capacity=" << load_queue_capacity
+              << ", store_queue_capacity=" << store_queue_capacity
               << ", fetch_width=" << fetch_width
               << ", fetch_decode_fifo_capacity=" << fifo_capacity
               << ", decode_width=" << decode_width
               << ", rename_width=" << rename_width
               << ", issue_width=" << issue_width
+              << ", memory_width=" << memory_width
               << ", commit_width=" << commit_width
               << ", load_balance=" << (load_balance ? "on" : "off")
               << ", ticks=" << (ticks + 1)
@@ -229,8 +269,18 @@ int main(int argc, char** argv) {
               << ", rename=" << backend.stats.renamed
               << ", issue_accept=" << backend.stats.accepted
               << ", issue=" << backend.stats.issued
+              << ", memory_issue=" << backend.stats.memory_issued
               << ", execute_accept=" << backend.stats.execute_accepted
               << ", execute_complete=" << backend.stats.execute_completed
+              << ", memory_execute_accept="
+              << backend.stats.memory_execute_accepted
+              << ", memory_execute_complete="
+              << backend.stats.memory_execute_completed
+              << ", load_store_forwards="
+              << backend.stats.load_store_forwards
+              << ", load_store_waits=" << backend.stats.load_store_waits
+              << ", load_queue_max=" << backend.stats.load_queue_max_occupancy
+              << ", store_queue_max=" << backend.stats.store_queue_max_occupancy
               << ", commit=" << backend.stats.retired
               << ", commit_redirects=" << backend.stats.redirects
               << ", fetch_decode_fifo_max="
@@ -244,6 +294,8 @@ int main(int argc, char** argv) {
               << ", decode_backpressure_stalls="
               << backend.stats.decode_backpressure_stalls
               << ", rename_resource_stalls=" << backend.stats.resource_stalls
+              << ", rob_resource_stalls=" << backend.stats.rob_resource_stalls
+              << ", lsq_resource_stalls=" << backend.stats.lsq_resource_stalls
               << ", rename_issue_backpressure_stalls="
               << backend.stats.issue_backpressure_stalls
               << ", free_physical_registers=" << core.freePhysicalRegisters() << '\n';

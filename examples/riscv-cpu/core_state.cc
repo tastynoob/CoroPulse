@@ -7,11 +7,15 @@
 
 namespace riscv_cpu {
 
-CoreState::CoreState(std::size_t physical_registers)
+CoreState::CoreState(std::size_t physical_registers, std::size_t rob_capacity)
     : physical_register_count_(physical_registers),
+      rob_capacity_(rob_capacity),
       physical_regs_(physical_registers, 0) {
     if (physical_registers < registers_.size()) {
         throw std::runtime_error("physical register count must cover architectural registers");
+    }
+    if (rob_capacity_ == 0) {
+        throw std::runtime_error("rob capacity must be greater than zero");
     }
 
     for (std::size_t i = 0; i < registers_.size(); ++i) {
@@ -26,6 +30,16 @@ CoreState::CoreState(std::size_t physical_registers)
 bool CoreState::canRenameAny() const {
     std::lock_guard lock(mutex_);
     return !free_phys_regs_.empty();
+}
+
+bool CoreState::canAllocatePhysicalRegisters(std::size_t count) const {
+    std::lock_guard lock(mutex_);
+    return free_phys_regs_.size() >= count;
+}
+
+bool CoreState::canAllocateRob(std::size_t count) const {
+    std::lock_guard lock(mutex_);
+    return rob_capacity_ >= (rob_.size() - commit_head_) + count;
 }
 
 void CoreState::rename(DynInstPtr dyn_inst) {
@@ -45,6 +59,8 @@ void CoreState::rename(DynInstPtr dyn_inst) {
     auto& rename = dyn_inst->renameState();
     rename.sequence = sequence;
     rename.writes_rd = writes;
+    rename.load = isLoad(inst);
+    rename.store = isStore(inst);
     rename.memory = isMemory(inst);
 
     if (usesRs1(inst)) {
@@ -80,6 +96,9 @@ void CoreState::dispatchRenamed(DynInstPtr dyn_inst) {
         os << "dispatch sequence does not match rob tail: sequence="
            << rename.sequence << ", rob_tail=" << rob_.size();
         throw std::runtime_error(os.str());
+    }
+    if (rob_.size() - commit_head_ >= rob_capacity_) {
+        throw std::runtime_error("dispatch ran out of rob entries");
     }
 
     rename.dispatched = true;
@@ -143,6 +162,7 @@ RetireResult CoreState::retire(std::size_t max_count) {
         const auto& execute = entry.inst->executeState();
         const auto value =
             rename.writes_rd ? physical_regs_[rename.phys_dst] : std::uint64_t{0};
+        result.retired_insts.push_back(entry.inst);
         result.trace.push_back(RetiredInstTrace{
             rename.sequence,
             entry.inst->pc(),
@@ -153,9 +173,25 @@ RetireResult CoreState::retire(std::size_t max_count) {
             value,
             execute.store,
             execute.redirect,
+            execute.exception,
         });
+        if (execute.exception) {
+            if (rename.writes_rd) {
+                free_phys_regs_.push_back(rename.phys_dst);
+                auto& reg = registers_[static_cast<std::size_t>(inst.rd)];
+                if (reg.producer && *reg.producer == rename.sequence) {
+                    reg.producer.reset();
+                }
+            }
+            result.redirect = ControlRedirect{entry.inst->pc() + 4, true};
+            ++commit_head_;
+            ++committed_;
+            ++result.retired;
+            flushAfterRedirectLocked(rename.sequence);
+            break;
+        }
         if (execute.store) {
-            result.stores.push_back(*execute.store);
+            result.stores.push_back(RetiredStore{entry.inst, *execute.store});
         }
         if (execute.branch_update) {
             result.branch_updates.push_back(*execute.branch_update);
@@ -182,20 +218,6 @@ RetireResult CoreState::retire(std::size_t max_count) {
     return result;
 }
 
-bool CoreState::memoryOrderReady(std::size_t sequence) const {
-    std::lock_guard lock(mutex_);
-    if (sequence >= rob_.size()) {
-        return false;
-    }
-    for (std::size_t i = commit_head_; i < sequence; ++i) {
-        const auto* inst = rob_[i].inst;
-        if (inst && isMemory(inst->staticInst())) {
-            return false;
-        }
-    }
-    return true;
-}
-
 std::size_t CoreState::committedCount() const {
     std::lock_guard lock(mutex_);
     return committed_;
@@ -219,8 +241,17 @@ std::size_t CoreState::freePhysicalRegisters() const {
     return free_phys_regs_.size();
 }
 
+std::size_t CoreState::freeRobEntries() const {
+    std::lock_guard lock(mutex_);
+    return rob_capacity_ - (rob_.size() - commit_head_);
+}
+
 std::size_t CoreState::physicalRegisterCount() const noexcept {
     return physical_register_count_;
+}
+
+std::size_t CoreState::robCapacity() const noexcept {
+    return rob_capacity_;
 }
 
 std::uint64_t CoreState::readPhysicalRegister(std::size_t phys) const noexcept {

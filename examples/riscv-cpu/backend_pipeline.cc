@@ -63,18 +63,24 @@ BackendPipeline::BackendPipeline(CoreState& core, SimpleSram& sram,
                                  std::size_t fetch_width,
                                  std::size_t decode_width,
                                  std::size_t issue_capacity,
+                                 std::size_t load_queue_capacity,
+                                 std::size_t store_queue_capacity,
                                  std::size_t dispatch_width,
                                  std::size_t issue_width,
+                                 std::size_t memory_width,
                                  std::size_t commit_width,
                                  std::ostream* trace_out,
                                  std::size_t trace_limit)
     : frontend_queue(frontend_queue_capacity, fetch_width, decode_width),
       issue(core, issue_capacity, dispatch_width, issue_width),
+      lsq(load_queue_capacity, store_queue_capacity),
       execute(core, sram),
-      commit(core, sram, commit_width, trace_out, trace_limit),
+      memory(core, sram, lsq, memory_width),
+      commit(core, sram, lsq, commit_width, trace_out, trace_limit),
       rename_width_(rename_width) {
-    if (rename_width_ == 0 || commit_width == 0) {
-        throw std::runtime_error("backend rename and commit widths must be greater than zero");
+    if (rename_width_ == 0 || commit_width == 0 || memory_width == 0) {
+        throw std::runtime_error(
+            "backend rename, memory, and commit widths must be greater than zero");
     }
 }
 
@@ -85,12 +91,18 @@ std::size_t BackendPipeline::renameWidth() const noexcept {
 void BackendPipeline::flushAfterRedirect(const InstBundle* dispatch,
                                          coropulse::Input<InstBundle>& input) {
     commit.discard(dispatch);
+    if (rename.hasBundle()) {
+        const auto& bundle = rename.bundle();
+        commit.discard(&bundle);
+    }
     (void)input.take();
     frontend_queue.clear();
     decode.clear();
     rename.clear();
     issue.clear();
+    lsq.clear();
     execute.clear();
+    memory.clear();
     commit.completeRedirectFlush();
 }
 

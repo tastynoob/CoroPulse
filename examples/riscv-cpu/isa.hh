@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace riscv_cpu {
@@ -75,7 +76,11 @@ const char* opcodeName(Opcode opcode);
 bool usesRs1(const StaticInst& inst);
 bool usesRs2(const StaticInst& inst);
 bool writesRd(const StaticInst& inst);
+bool isLoad(const StaticInst& inst);
+bool isStore(const StaticInst& inst);
 bool isMemory(const StaticInst& inst);
+std::size_t memoryAccessBytes(const StaticInst& inst);
+bool loadSignExtends(const StaticInst& inst);
 bool isControlFlow(const StaticInst& inst);
 bool isHalt(const StaticInst& inst);
 

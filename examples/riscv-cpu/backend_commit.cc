@@ -7,10 +7,11 @@
 namespace riscv_cpu {
 
 CommitPipe::CommitPipe(CoreState& core, SimpleSram& sram,
-                       std::size_t commit_width, std::ostream* trace_out,
-                       std::size_t trace_limit)
+                       LoadStoreQueue& lsq, std::size_t commit_width,
+                       std::ostream* trace_out, std::size_t trace_limit)
     : core_(core),
       sram_(sram),
+      lsq_(lsq),
       commit_width_(commit_width),
       trace_out_(trace_out),
       trace_limit_(trace_limit) {}
@@ -75,7 +76,10 @@ RetireResult CommitPipe::retire(coropulse::TickId tick, BackendStats& stats) {
         traceRetired(tick, inst);
     }
     for (const auto& store : result.stores) {
-        sram_.store(store.address, store.value, store.bytes);
+        sram_.store(store.store.address, store.store.value, store.store.bytes);
+    }
+    for (auto* inst : result.retired_insts) {
+        lsq_.retire(inst);
     }
     stats.retired += result.retired;
     if (result.redirect) {
@@ -134,6 +138,19 @@ void CommitPipe::traceRetired(coropulse::TickId tick, const RetiredInstTrace& in
         if (inst.redirect->halt) {
             os << " halt";
         }
+    }
+    if (inst.exception) {
+        os << " exception=";
+        switch (inst.exception->code) {
+        case ExceptionCode::load_access_fault:
+            os << "load_access_fault";
+            break;
+        case ExceptionCode::store_access_fault:
+            os << "store_access_fault";
+            break;
+        }
+        os << " fault=0x" << std::hex << inst.exception->fault_address
+           << std::dec;
     }
     os << '\n';
     ++trace_count_;

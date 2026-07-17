@@ -539,7 +539,7 @@ bool writesRd(const StaticInst& inst) {
     }
 }
 
-bool isMemory(const StaticInst& inst) {
+bool isLoad(const StaticInst& inst) {
     switch (inst.opcode) {
     case Opcode::lb:
     case Opcode::lh:
@@ -548,10 +548,55 @@ bool isMemory(const StaticInst& inst) {
     case Opcode::lbu:
     case Opcode::lhu:
     case Opcode::lwu:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool isStore(const StaticInst& inst) {
+    switch (inst.opcode) {
     case Opcode::sb:
     case Opcode::sh:
     case Opcode::sw:
     case Opcode::sd:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool isMemory(const StaticInst& inst) {
+    return isLoad(inst) || isStore(inst);
+}
+
+std::size_t memoryAccessBytes(const StaticInst& inst) {
+    switch (inst.opcode) {
+    case Opcode::lb:
+    case Opcode::lbu:
+    case Opcode::sb:
+        return 1;
+    case Opcode::lh:
+    case Opcode::lhu:
+    case Opcode::sh:
+        return 2;
+    case Opcode::lw:
+    case Opcode::lwu:
+    case Opcode::sw:
+        return 4;
+    case Opcode::ld:
+    case Opcode::sd:
+        return 8;
+    default:
+        return 0;
+    }
+}
+
+bool loadSignExtends(const StaticInst& inst) {
+    switch (inst.opcode) {
+    case Opcode::lb:
+    case Opcode::lh:
+    case Opcode::lw:
         return true;
     default:
         return false;
